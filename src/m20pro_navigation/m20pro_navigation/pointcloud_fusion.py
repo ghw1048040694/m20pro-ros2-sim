@@ -34,6 +34,7 @@ class PointCloudFusion(Node):
         self.declare_parameter("transform_cloud", True)
         self.declare_parameter("use_latest_tf", True)
         self.declare_parameter("transform_timeout_s", 0.05)
+        self.declare_parameter("max_source_age_s", 0.25)
         
         # === 初始化成员变量 ===
         self.cloud_ranges: Optional[np.ndarray] = None
@@ -42,6 +43,12 @@ class PointCloudFusion(Node):
         self.cloud_received = False
         self.front_received = False
         self.rear_received = False
+        self.cloud_stamp = None
+        self.front_stamp = None
+        self.rear_stamp = None
+        self.cloud_update_time = None
+        self.front_update_time = None
+        self.rear_update_time = None
         self.last_tf_warning_time = None
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -122,6 +129,8 @@ class PointCloudFusion(Node):
         if ranges is None:
             return
         self.cloud_ranges = ranges
+        self.cloud_stamp = self._output_stamp_for_cloud(msg)
+        self.cloud_update_time = self.get_clock().now()
         self.cloud_received = True
     
     def _on_front_lidar(self, msg: PointCloud2) -> None:
@@ -130,6 +139,8 @@ class PointCloudFusion(Node):
         if ranges is None:
             return
         self.front_ranges = ranges
+        self.front_stamp = self._output_stamp_for_cloud(msg)
+        self.front_update_time = self.get_clock().now()
         self.front_received = True
     
     def _on_rear_lidar(self, msg: PointCloud2) -> None:
@@ -138,6 +149,8 @@ class PointCloudFusion(Node):
         if ranges is None:
             return
         self.rear_ranges = ranges
+        self.rear_stamp = self._output_stamp_for_cloud(msg)
+        self.rear_update_time = self.get_clock().now()
         self.rear_received = True
     
     def _pointcloud_to_ranges(self, cloud_msg: PointCloud2) -> Optional[np.ndarray]:
@@ -221,6 +234,26 @@ class PointCloudFusion(Node):
             )
             return False
 
+    def _output_stamp_for_cloud(self, cloud_msg: PointCloud2):
+        if not bool(self.get_parameter("transform_cloud").value):
+            return cloud_msg.header.stamp
+        source_frame = self._clean_frame(cloud_msg.header.frame_id)
+        target_frame = self._target_frame()
+        if not source_frame or source_frame == target_frame:
+            return cloud_msg.header.stamp
+        if bool(self.get_parameter("use_latest_tf").value):
+            return self.get_clock().now().to_msg()
+        return cloud_msg.header.stamp
+
+    def _source_is_fresh(self, update_time) -> bool:
+        if update_time is None:
+            return False
+        max_age = float(self.get_parameter("max_source_age_s").value)
+        if max_age <= 0.0:
+            return True
+        age = (self.get_clock().now() - update_time).nanoseconds * 1e-9
+        return age <= max_age
+
     def _warn_tf_throttled(self, message: str) -> None:
         now = self.get_clock().now()
         if self.last_tf_warning_time is None:
@@ -276,7 +309,10 @@ class PointCloudFusion(Node):
         if self.input_cloud_topic:
             if not self.cloud_received or self.cloud_ranges is None:
                 return
+            if not self._source_is_fresh(self.cloud_update_time):
+                return
             fused_ranges = self.cloud_ranges
+            stamp = self.cloud_stamp
         elif (
             not self.front_received
             or not self.rear_received
@@ -285,12 +321,18 @@ class PointCloudFusion(Node):
         ):
             return
         else:
+            if (
+                not self._source_is_fresh(self.front_update_time)
+                or not self._source_is_fresh(self.rear_update_time)
+            ):
+                return
             # 融合前后雷达数据（取最小值）
             fused_ranges = np.minimum(self.front_ranges, self.rear_ranges)
+            stamp = self.front_stamp or self.rear_stamp
         
         # 创建 LaserScan 消息
         scan_msg = LaserScan()
-        scan_msg.header.stamp = self.get_clock().now().to_msg()
+        scan_msg.header.stamp = stamp or self.get_clock().now().to_msg()
         scan_msg.header.frame_id = str(self.get_parameter("frame_id").value)
         scan_msg.angle_min = self.angle_min
         scan_msg.angle_max = self.angle_max

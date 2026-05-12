@@ -150,6 +150,69 @@ ros2 run m20pro_navigation control_gui
 
 它仍然按官方 demo 连接 `10.21.31.103:30001`，用于运动状态、轴指令、单点导航、定位和避障状态查询。
 
+## YOLO 巡检感知
+
+项目新增了 `m20pro_inspection` 包，用于把自训练 YOLOv8 巡检模型接入 M20 Pro。它默认按手册中的 RTSP 地址读取前广角相机：
+
+```text
+rtsp://10.21.31.103:8554/video1
+```
+
+后广角相机为：
+
+```text
+rtsp://10.21.31.103:8554/video2
+```
+
+RK3588 真机建议使用 RKNN 模型。把转换好的模型放到：
+
+```text
+src/m20pro_inspection/models/inspection.rknn
+```
+
+板端需要安装 Rockchip 的 RKNN runtime / `rknn-toolkit-lite2`，否则节点会提示缺少 `rknnlite`。如果手里只有 YOLOv8 的 `best.pt`，先导出 ONNX，再用 RKNN-Toolkit2 转成 RK3588 的 `.rknn`。
+
+如果需要显示类别名称，可再放一个一行一个类别名的文件：
+
+```text
+src/m20pro_inspection/models/classes.txt
+```
+
+默认 launch 会优先使用安装目录中的模型；如果没有找到，也会自动回退查找当前 workspace 下的 `src/m20pro_inspection/models/inspection.rknn` 和 `~/m20pro_models/inspection.rknn`。
+
+重新编译并启动：
+
+```bash
+colcon build --packages-select m20pro_inspection --symlink-install
+source install/setup.bash
+ros2 launch m20pro_inspection m20pro_inspection.launch.py
+```
+
+查看结果：
+
+```bash
+ros2 topic echo /m20pro_yolov8_inspection/detections
+ros2 topic echo /m20pro_yolov8_inspection/events
+```
+
+如果要用后摄像头：
+
+```bash
+ros2 launch m20pro_inspection m20pro_inspection.launch.py \
+  camera_name:=rear_wide \
+  rtsp_url:=rtsp://10.21.31.103:8554/video2
+```
+
+上位机调试时也可以传入 ONNX 模型：
+
+```bash
+ros2 launch m20pro_inspection m20pro_inspection.launch.py \
+  backend:=onnx \
+  model_path:=/path/to/best.onnx
+```
+
+典型巡检流程是：Nav2 到达任务点后停车，YOLO 节点检测数帧，巡检任务管理器读取 `/m20pro_yolov8_inspection/events`，记录截图和异常结果，再继续下一个点位。导航避障仍然以雷达 `/cloud_nav -> /scan -> costmap` 为主，YOLO 不参与底层安全闭环。
+
 ## 地图编辑
 
 项目里带了一个简单的地图编辑器，可以直接处理 `occ_grid.yaml` / `occ_grid.pgm`：

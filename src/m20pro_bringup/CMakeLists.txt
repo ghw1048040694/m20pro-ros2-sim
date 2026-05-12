@@ -3,7 +3,7 @@ project(m20pro_bringup)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY config launch maps rviz
+install(DIRECTORY config launch maps rviz behavior_trees
   DESTINATION share/${PROJECT_NAME}
 )
 

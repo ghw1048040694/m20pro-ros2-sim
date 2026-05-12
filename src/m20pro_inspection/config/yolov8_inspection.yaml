@@ -1,0 +1,35 @@
+m20pro_yolov8_inspection:
+  ros__parameters:
+    # M20 Pro software manual RTSP camera streams:
+    #   front wide camera: rtsp://10.21.31.103:8554/video1
+    #   rear wide camera:  rtsp://10.21.31.103:8554/video2
+    source_type: "rtsp"  # rtsp or image_topic
+    rtsp_url: "rtsp://10.21.31.103:8554/video1"
+    image_topic: "/camera/image_raw"
+    camera_name: "front_wide"
+
+    # Put the RK3588 NPU model at src/m20pro_inspection/models/inspection.rknn,
+    # or override model_path in the launch command.
+    backend: "auto"  # auto, rknn, onnx, or dry_run
+    model_path: ""
+    class_names_path: ""
+    class_names: [""]
+
+    input_size: 640
+    conf_threshold: 0.35
+    iou_threshold: 0.45
+    output_has_objectness: false
+    max_detections: 100
+    publish_rate_hz: 5.0
+    reconnect_interval_s: 2.0
+
+    publish_annotated_image: true
+    publish_empty_detections: true
+    detections_topic: "~/detections"
+    annotated_image_topic: "~/annotated_image"
+    event_topic: "~/events"
+
+    # Empty event_classes means every class can generate an event.
+    event_classes: [""]
+    event_conf_threshold: 0.60
+    event_min_interval_s: 2.0

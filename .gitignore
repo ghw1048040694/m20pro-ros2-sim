@@ -28,6 +28,7 @@ __pycache__/
 *.ply
 *.onnx
 *.engine
+*.rknn
 *.pt
 *.pth
 

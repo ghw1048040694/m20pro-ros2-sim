@@ -2,6 +2,7 @@ import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from builtin_interfaces.msg import Duration
 import rclpy
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from rclpy.node import Node
@@ -32,6 +33,8 @@ class DynamicObstacleSimulator(Node):
         )
         self.declare_parameter("frame_id", "map")
         self.declare_parameter("publish_rate_hz", 20.0)
+        self.declare_parameter("marker_publish_rate_hz", 8.0)
+        self.declare_parameter("marker_lifetime_s", 0.3)
         self.declare_parameter("marker_topic", "/dynamic_obstacle_markers")
         self.declare_parameter("pose_topic", "/dynamic_obstacles")
         self.declare_parameter("alert_topic", "/dynamic_obstacle_active")
@@ -41,6 +44,7 @@ class DynamicObstacleSimulator(Node):
         self.obstacles = self._parse_specs(self.get_parameter("obstacle_specs").value)
         self.robot_pose: Optional[Pose] = None
         self.start_time = self.get_clock().now()
+        self.last_marker_time = self.start_time
 
         self.pose_pub = self.create_publisher(PoseArray, str(self.get_parameter("pose_topic").value), 10)
         self.marker_pub = self.create_publisher(MarkerArray, str(self.get_parameter("marker_topic").value), 10)
@@ -67,6 +71,10 @@ class DynamicObstacleSimulator(Node):
         pose_array.header.stamp = now.to_msg()
         pose_array.header.frame_id = frame_id
 
+        marker_rate = max(0.1, float(self.get_parameter("marker_publish_rate_hz").value))
+        marker_period = 1.0 / marker_rate
+        marker_dt = (now - self.last_marker_time).nanoseconds * 1e-9
+        publish_markers = marker_dt >= marker_period
         marker_array = MarkerArray()
         alert = False
         alert_distance = float(self.get_parameter("alert_distance").value)
@@ -79,22 +87,30 @@ class DynamicObstacleSimulator(Node):
             pose.orientation.w = 1.0
             pose_array.poses.append(pose)
 
-            marker = Marker()
-            marker.header = pose_array.header
-            marker.ns = "dynamic_obstacles"
-            marker.id = idx
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-            marker.pose = pose
-            marker.pose.position.z = 0.2
-            marker.scale.x = obstacle.radius * 2.0
-            marker.scale.y = obstacle.radius * 2.0
-            marker.scale.z = 0.4
-            marker.color.r = 1.0
-            marker.color.g = 0.3
-            marker.color.b = 0.1
-            marker.color.a = 0.85
-            marker_array.markers.append(marker)
+            if publish_markers:
+                marker = Marker()
+                marker.header = pose_array.header
+                marker.ns = "dynamic_obstacles"
+                marker.id = idx
+                marker.type = Marker.CYLINDER
+                marker.action = Marker.ADD
+                marker.pose.position.x = x
+                marker.pose.position.y = y
+                marker.pose.position.z = 0.2
+                marker.pose.orientation.w = 1.0
+                marker.scale.x = obstacle.radius * 2.0
+                marker.scale.y = obstacle.radius * 2.0
+                marker.scale.z = 0.4
+                marker.color.r = 1.0
+                marker.color.g = 0.3
+                marker.color.b = 0.1
+                marker.color.a = 0.85
+                lifetime_s = max(marker_period * 2.0, float(self.get_parameter("marker_lifetime_s").value))
+                marker.lifetime = Duration(
+                    sec=int(lifetime_s),
+                    nanosec=int((lifetime_s % 1.0) * 1e9),
+                )
+                marker_array.markers.append(marker)
 
             if self.robot_pose is not None:
                 dx = x - self.robot_pose.position.x
@@ -103,7 +119,9 @@ class DynamicObstacleSimulator(Node):
                     alert = True
 
         self.pose_pub.publish(pose_array)
-        self.marker_pub.publish(marker_array)
+        if publish_markers:
+            self.last_marker_time = now
+            self.marker_pub.publish(marker_array)
         alert_msg = Bool()
         alert_msg.data = alert
         self.alert_pub.publish(alert_msg)
