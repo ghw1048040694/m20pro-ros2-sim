@@ -7,6 +7,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -15,30 +16,38 @@ def generate_launch_description():
     nav2_bringup_share = get_package_share_directory("nav2_bringup")
 
     default_params = os.path.join(bringup_share, "config", "m20pro.yaml")
-    nav2_params = os.path.join(bringup_share, "config", "nav2_params.yaml")
+    default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_foxy.yaml")
     default_urdf = os.path.join(desc_share, "urdf", "M20.urdf")
     default_map = os.path.join(
-        bringup_share, "maps", "working_1-20260429-162852_edited", "occ_grid.yaml"
+        bringup_share, "maps", "working_1-20260429-162852_edited3", "occ_grid.yaml"
     )
     default_rviz = os.path.join(bringup_share, "rviz", "m20pro_sim.rviz")
 
     params_file = LaunchConfiguration("params_file")
+    nav2_params_file = LaunchConfiguration("nav2_params_file")
     map_yaml = LaunchConfiguration("map")
     cloud_topic = LaunchConfiguration("cloud_topic")
     use_fusion = LaunchConfiguration("fusion")
     use_rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
+    enable_axis_command = LaunchConfiguration("enable_axis_command")
 
     with open(default_urdf, "r", encoding="utf-8") as urdf_file:
         robot_description = urdf_file.read()
 
     return LaunchDescription([
         DeclareLaunchArgument("params_file", default_value=default_params),
+        DeclareLaunchArgument("nav2_params_file", default_value=default_nav2_params),
         DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("cloud_topic", default_value="/cloud_nav"),
         DeclareLaunchArgument("fusion", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
+        DeclareLaunchArgument(
+            "enable_axis_command",
+            default_value="false",
+            description="Set true only when 104 is allowed to send /cmd_vel axis commands to 103.",
+        ),
 
         Node(
             package="m20pro_navigation",
@@ -64,6 +73,7 @@ def generate_launch_description():
                 {
                     "publish_tf": True,
                     "enable_native_goal_bridge": False,
+                    "enable_axis_command": ParameterValue(enable_axis_command, value_type=bool),
                 },
             ],
         ),
@@ -103,7 +113,7 @@ def generate_launch_description():
                 os.path.join(nav2_bringup_share, "launch", "navigation_launch.py")
             ),
             launch_arguments={
-                "params_file": nav2_params,
+                "params_file": nav2_params_file,
                 "use_sim_time": "False",
                 "use_composition": "False",
             }.items(),

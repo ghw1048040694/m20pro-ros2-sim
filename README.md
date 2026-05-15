@@ -1,6 +1,6 @@
 # M20 Pro ROS 2 Navigation Project
 
-这个 workspace 面向 M20 Pro 的 104 通用主机部署，也可以先在 Humble 上位机编译调试。设计按厂商手册拆成三层：
+这个 workspace 面向 M20 Pro 的 104 通用主机部署，也可以先在 ROS 2 Humble 上位机编译调试。设计按厂商手册拆成三层：
 
 - `m20pro_description`: 使用官方 URDF 和 meshes，mesh 路径已改成 `package://m20pro_description/...`。
 - `m20pro_navigation`: ROS 2 节点。`tcp_bridge` 通过官方 TCP JSON 协议连接 103 AOS，真机部署时由 Nav2 输出 `/cmd_vel`，再由 `tcp_bridge` 转成厂商轴指令。官方 Tk demo 已集成为 `control_gui`。
@@ -8,7 +8,7 @@
 
 ## 版权与归属
 
-本项目是面向 M20 Pro 机器人二次开发的个人集成工程，不是云深处/DEEP Robotics 官方项目，也不代表官方技术支持或官方发布版本。
+本项目是面向 M20 Pro 机器人二次开发的非官方 ROS 2 集成工程，不是云深处/DEEP Robotics 官方项目，也不代表官方技术支持或官方发布版本。
 
 - `M20 Pro`、`DEEP Robotics`、`云深处` 及相关产品名称归原权利方所有。
 - 厂商开发手册、官方 URDF、STL mesh、官方示例控制台代码和官方协议说明归原权利方所有。它们在本项目中仅用于已购设备的适配、调试和学习，不表示这些官方资源被重新授权为本项目的开源代码。
@@ -23,21 +23,14 @@
 
 ## 编译
 
-在 104 Foxy 或上位机 Humble 上：
+克隆仓库后，在 workspace 根目录执行：
 
 ```bash
-cd /home/user/m20pro_ros2_ws
 source /opt/ros/foxy/setup.bash       # 104 主机
 # source /opt/ros/humble/setup.bash   # Humble 上位机
 rosdep install --from-paths src -y --ignore-src
 colcon build --symlink-install
 source install/setup.bash
-```
-
-当前目录中的 workspace 路径是：
-
-```bash
-cd /home/fabu/桌面/M20Pro/m20pro_ros2_ws
 ```
 
 ## 运行
@@ -69,7 +62,7 @@ ros2 launch m20pro_bringup m20pro_sim.launch.py
 如果要换成别的地图，再从 106 导出或复制激活地图，例如：
 
 ```bash
-scp -r user@10.21.31.106:/var/opt/robot/data/maps/active ~/m20pro_active_map
+scp -r user@10.21.31.106:/var/opt/robot/data/maps/active "$HOME/m20pro_active_map"
 ```
 
 启动：
@@ -141,14 +134,14 @@ ros2 param set /m20pro_dual_lidar_simulator publish_debug_lidars true
 
 ## 官方控制台
 
-原来的 `M20Pro_ws/control.py` 已集成到本 workspace：
+项目提供了一个基于官方 TCP 协议的 Tk 控制台：
 
 ```bash
 source install/setup.bash
 ros2 run m20pro_navigation control_gui
 ```
 
-它仍然按官方 demo 连接 `10.21.31.103:30001`，用于运动状态、轴指令、单点导航、定位和避障状态查询。
+它连接 `10.21.31.103:30001`，用于运动状态、轴指令、单点导航、定位和避障状态查询。
 
 ## YOLO 巡检感知
 
@@ -178,7 +171,7 @@ src/m20pro_inspection/models/inspection.rknn
 src/m20pro_inspection/models/classes.txt
 ```
 
-默认 launch 会优先使用安装目录中的模型；如果没有找到，也会自动回退查找当前 workspace 下的 `src/m20pro_inspection/models/inspection.rknn` 和 `~/m20pro_models/inspection.rknn`。
+默认 launch 会优先使用安装目录中的模型；如果没有找到，也会自动回退查找当前 workspace 下的 `src/m20pro_inspection/models/inspection.rknn` 和 `$HOME/m20pro_models/inspection.rknn`。
 
 重新编译并启动：
 
@@ -241,15 +234,27 @@ ros2 run m20pro_navigation map_editor /path/to/occ_grid.yaml
 ros2 launch m20pro_bringup m20pro_sim.launch.py map:=/path/to/edited_map/occ_grid.yaml
 ```
 
-## 已迁移内容
+## 离线诊断采集
 
-旧目录 `M20Pro_ws` 中的内容已经迁入：
+机器狗无法联网时，可以把只读采集脚本复制到 104 或 106，现场运行后把压缩包带回有网的电脑分析：
 
-- `M20Pro_ws/urdf/M20.urdf` -> `src/m20pro_description/urdf/M20.urdf`
-- `M20Pro_ws/meshes/*.STL` -> `src/m20pro_description/meshes/`
-- `M20Pro_ws/control.py` -> `src/m20pro_navigation/m20pro_navigation/control_gui.py`
+```bash
+bash tools/collect_ros_snapshot.sh
+```
 
-确认新 workspace 编译和运行正常后，旧的 `M20Pro_ws` 可以不再保留。
+如果只复制单个脚本到机器狗：
+
+```bash
+bash collect_ros_snapshot.sh
+```
+
+脚本会生成类似下面的压缩包：
+
+```text
+m20pro_ros_snapshot_<host>_<time>.tar.gz
+```
+
+它会采集 ROS topic/node/service/action 列表、关键话题频率、节点参数、TF、进程、网络环境和 106 地图目录信息。脚本只读，不会发运动命令、不会重启服务、不会修改地图。
 
 ## 部署注意
 

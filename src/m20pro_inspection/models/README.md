@@ -13,3 +13,9 @@ classes.txt
 ```
 
 Model artifacts such as `*.pt`, `*.onnx`, and `*.rknn` are ignored by Git.
+
+Dataset/training reference:
+
+```text
+https://github.com/liu-big/power_station_safety.git
+```

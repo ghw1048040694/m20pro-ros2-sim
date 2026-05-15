@@ -1,0 +1,52 @@
+# Inspection waypoint template for the future mission manager.
+#
+# Coordinates are in the floor map frame used by Nav2.
+# For real robot deployment, use poses from the 106 active map copied to 104.
+# yaw is in radians.
+
+mission:
+  name: "single_floor_demo"
+  frame_id: "map"
+  default_inspect_duration_s: 4.0
+  default_goal_timeout_s: 90.0
+  default_retry_count: 1
+
+floors:
+  F1:
+    map_yaml: ""
+    waypoints:
+      - id: "start_check"
+        label: "Start Check"
+        pose:
+          x: 0.0
+          y: 0.0
+          yaw: 0.0
+        inspect_duration_s: 3.0
+        camera: "front_wide"
+        target_classes: []
+        required_events: []
+        notes: "Replace with a real safe start-area inspection pose."
+
+      - id: "corridor_check"
+        label: "Corridor Check"
+        pose:
+          x: 2.0
+          y: 0.0
+          yaw: 0.0
+        inspect_duration_s: 5.0
+        camera: "front_wide"
+        target_classes: ["person", "smoke"]
+        required_events: []
+        notes: "Example point. Tune pose and class names for your model."
+
+      - id: "return_check"
+        label: "Return Check"
+        pose:
+          x: 0.5
+          y: 0.0
+          yaw: 3.14159
+        inspect_duration_s: 3.0
+        camera: "front_wide"
+        target_classes: []
+        required_events: []
+        notes: "Example return/finish pose."

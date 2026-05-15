@@ -15,7 +15,7 @@ def generate_launch_description():
     nav2_bringup_share = get_package_share_directory("nav2_bringup")
 
     default_params = os.path.join(bringup_share, "config", "m20pro.yaml")
-    nav2_params = os.path.join(bringup_share, "config", "nav2_params.yaml")
+    default_nav2_params = os.path.join(bringup_share, "config", "nav2_params.yaml")
     default_urdf = os.path.join(desc_share, "urdf", "M20.urdf")
     default_map = os.path.join(
         bringup_share, "maps", "working_1-20260429-162852_edited3", "occ_grid.yaml"
@@ -23,6 +23,7 @@ def generate_launch_description():
     default_rviz = os.path.join(bringup_share, "rviz", "m20pro_sim.rviz")
 
     params_file = LaunchConfiguration("params_file")
+    nav2_params_file = LaunchConfiguration("nav2_params_file")
     map_yaml = LaunchConfiguration("map")
     use_rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
@@ -32,6 +33,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("params_file", default_value=default_params),
+        DeclareLaunchArgument("nav2_params_file", default_value=default_nav2_params),
         DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
@@ -101,7 +103,7 @@ def generate_launch_description():
                 os.path.join(nav2_bringup_share, "launch", "navigation_launch.py")
             ),
             launch_arguments={
-                "params_file": nav2_params,
+                "params_file": nav2_params_file,
                 "use_sim_time": "False",
                 "use_composition": "False",
             }.items(),

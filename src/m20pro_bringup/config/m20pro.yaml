@@ -16,6 +16,7 @@ m20pro_tcp_bridge:
     base_frame: "base_link"
     publish_tf: true
     enable_native_goal_bridge: false
+    enable_axis_command: true
     send_heartbeat: false
 
 m20pro_grid_planner:
@@ -83,6 +84,7 @@ m20pro_dynamic_obstacle_simulator:
       - "0.5,-0.6,0.5,1.0,0.18,6.0,0.35"
       - "4.5,0.5,2.5,0.5,0.15,16.0,0.0"
       - "9.0,1.0,5.5,1.0,0.15,16.0,0.0"
+      - "12.0,1.0,12.0,1.0,0.15,16.0,0.0"
 
 m20pro_dual_lidar_simulator:
   ros__parameters:

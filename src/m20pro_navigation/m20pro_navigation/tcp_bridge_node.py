@@ -31,6 +31,7 @@ class M20TcpBridge(Node):
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("publish_tf", True)
         self.declare_parameter("enable_native_goal_bridge", False)
+        self.declare_parameter("enable_axis_command", True)
         self.declare_parameter("send_heartbeat", False)
 
         self.client = M20TcpClient(
@@ -57,9 +58,15 @@ class M20TcpBridge(Node):
         poll_period = 1.0 / max(0.5, float(self.get_parameter("poll_rate_hz").value))
         cmd_period = 1.0 / max(1.0, float(self.get_parameter("cmd_vel_rate_hz").value))
         self.create_timer(poll_period, self._poll_robot)
-        self.create_timer(cmd_period, self._send_axis_command)
-        self.get_logger().info("M20 TCP bridge ready; target 103 host is %s:%s" % (
-            self.client.ip, self.client.port))
+        if bool(self.get_parameter("enable_axis_command").value):
+            self.create_timer(cmd_period, self._send_axis_command)
+            command_mode = "axis command enabled"
+        else:
+            command_mode = "shadow mode; axis command disabled"
+        self.get_logger().info(
+            "M20 TCP bridge ready; target 103 host is %s:%s; %s"
+            % (self.client.ip, self.client.port, command_mode)
+        )
 
     def destroy_node(self):
         self.client.close()
