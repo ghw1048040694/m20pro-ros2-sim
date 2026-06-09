@@ -450,6 +450,8 @@ ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'F21 2.0 
 ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'f21_demo_check'}"
 ```
 
+注意：`/m20pro/goal_command` 的点位 id 入口只负责把 `inspection_waypoints.yaml` 里的 `pose.x/y/yaw` 转成 `/m20pro/floor_goal`。它会在日志里打印点位类型和停留时间，但不会执行完整巡检任务编排。需要“到点停留、任务点/过渡点/充电点语义、按顺序跑多个点”的流程，用网页任务入口。
+
 ### initialpose_3d_adapter
 
 把 RViz 的 `/initialpose` 补上当前楼层 z 值，转发为 `/m20pro/initialpose_3d`。主要用于真机多楼层重定位实验：
@@ -618,7 +620,30 @@ curl http://localhost:8080/api/tasks
 - `建图`：建立单层/多层建图任务，预留 106 原厂建图启动/保存命令钩子，从 106 active map 拉取地图到 104；
 - `地图`：管理 104 归档地图并选择当前显示地图；
 - `标点`：点击地图生成巡检点、步态切换点、楼层切换点、出楼梯点、充电点、过渡点；
-- `任务`：用标点生成任务，并按顺序向 `/m20pro/floor_goal` 发布楼层目标。
+- `任务`：用标点生成任务，并按顺序向 `/m20pro/floor_goal` 发布楼层目标，同时向 `/m20pro/active_waypoint` 发布当前点位语义。
+
+巡检点不是单纯的 x/y 路径点。网页保存点位时会记录：
+
+- `pose.x/y/z/yaw`：地图坐标和到点朝向，yaw 单位为 rad；
+- `manual_point_type`：按《山猫 M20 系列软件开发手册》对应 `PointInfo`，`transition=过渡点(0)`、`task=任务点(1)`、`charge=充电点(3)`；
+- `dwell_s`：到达该点后的停留秒数，任务点默认 5s，过渡点默认 0s，充电点默认 0s；
+- `vendor_navigation`：原厂单点导航任务 Type=1003 的路径属性，包含 `Gait/Speed/Manner/ObsMode/NavMode`。
+
+默认值按开发手册设置：
+
+```text
+Gait=12      平地敏捷步态
+Speed=1     低速
+Manner=0    前进行走
+ObsMode=0   开启导航停避障
+NavMode=1   自主导航
+```
+
+过渡点默认 `NavMode=0`，用于更贴近手册建议的“多段直线导航代替复杂自主导航”。如果现场路径比较开阔，也可以在网页标点时把过渡点改为 `NavMode=1`。
+
+充电点必须放在任务最后。开发手册说明充电点到达后会自动进入充电桩并保持充电状态，直到收到下一个目标点请求，所以本工程前端/API 会拒绝“充电点后面继续串巡检点”的任务。
+
+当前网页任务执行仍然通过本工程 `/m20pro/floor_goal` + Nav2/floor_manager 跑；`vendor_navigation` 字段先完整持久化并发布到 `/m20pro/active_waypoint`，为后续切换到原厂 TCP `1003` 单点导航接口预留直接映射。
 
 任务执行防呆：
 
@@ -629,6 +654,9 @@ curl http://localhost:8080/api/tasks
 - 有任务执行时，网页/API 会拒绝切换地图；
 - 删除点位时，如果点位正在当前任务中，会拒绝删除；
 - 启动任务前会检查点位是否还存在、任务地图是否和当前地图一致；
+- 启动任务前会检查充电点是否放在任务最后；
+- 到达任务点后会按点位 `dwell_s` 停留，再下发下一个点；
+- 录包时建议记录 `/m20pro/active_waypoint`，用于复盘当前点位类型、yaw、停留时间和原厂导航字段；
 - web 节点重启后不会自动恢复旧的 running 任务，避免重启后误继续发目标。
 
 持久化数据默认放在 `~/.m20pro_web`，归档地图默认放在 `~/m20pro_maps`。拉取 106 地图依赖 104 能通过 `scp` 访问 `user@10.21.31.106:/var/opt/robot/data/maps/active`。

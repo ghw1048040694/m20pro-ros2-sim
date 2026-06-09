@@ -68,6 +68,7 @@ exec timeout "${DURATION_S}" ros2 bag record -o "${OUT_PATH}" \
   /m20pro/current_floor \
   /m20pro/stair_status \
   /m20pro/floor_goal \
+  /m20pro/active_waypoint \
   /m20pro_tcp_bridge/map_pose \
   /NAV_STATUS \
   /MOTION_STATE \

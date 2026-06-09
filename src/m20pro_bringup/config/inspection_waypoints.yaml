@@ -7,9 +7,24 @@
 mission:
   name: "multi_floor_sim_demo"
   frame_id: "map"
-  default_inspect_duration_s: 4.0
+  # M20 software development manual, single navigation task Type=1003.
+  # PointInfo: transition=0, task=1, charge=3.
+  # Path attributes: Gait=12 flat agile gait, Speed low=1/high=2,
+  # Manner forward=0/backward=1, ObsMode on=0/off=1,
+  # NavMode straight=0/autonomous=1.
+  default_task_dwell_s: 5.0
+  default_transition_dwell_s: 0.0
+  default_charge_dwell_s: 0.0
   default_goal_timeout_s: 90.0
   default_retry_count: 1
+  vendor_navigation_defaults:
+    Value: 0
+    MapID: 0
+    Gait: 12
+    Speed: 1
+    Manner: 0
+    ObsMode: 0
+    NavMode: 1
   # X30-style multi-floor semantics, kept on top of the M20Pro interfaces.
   # The floor manager treats every stair route as:
   # entry -> source-floor shared platform -> switch map -> target-floor shared platform -> post_exit.
@@ -78,11 +93,20 @@ floors:
     waypoints:
       - id: "start_check"
         label: "Start Check"
+        point_type: "task"
+        dwell_s: 3.0
         pose:
           x: 0.0
           y: 0.0
+          z: 0.0
           yaw: 0.0
-        inspect_duration_s: 3.0
+        vendor_navigation:
+          PointInfo: 1
+          Gait: 12
+          Speed: 1
+          Manner: 0
+          ObsMode: 0
+          NavMode: 1
         camera: "front_wide"
         target_classes: []
         required_events: []
@@ -90,11 +114,20 @@ floors:
 
       - id: "corridor_check"
         label: "Corridor Check"
+        point_type: "task"
+        dwell_s: 5.0
         pose:
           x: 2.0
           y: 0.0
+          z: 0.0
           yaw: 0.0
-        inspect_duration_s: 5.0
+        vendor_navigation:
+          PointInfo: 1
+          Gait: 12
+          Speed: 1
+          Manner: 0
+          ObsMode: 0
+          NavMode: 1
         camera: "front_wide"
         target_classes: ["person", "smoke"]
         required_events: []
@@ -102,11 +135,20 @@ floors:
 
       - id: "return_check"
         label: "Return Check"
+        point_type: "transition"
+        dwell_s: 0.0
         pose:
           x: 0.5
           y: 0.0
+          z: 0.0
           yaw: 3.14159
-        inspect_duration_s: 3.0
+        vendor_navigation:
+          PointInfo: 0
+          Gait: 12
+          Speed: 1
+          Manner: 0
+          ObsMode: 0
+          NavMode: 0
         camera: "front_wide"
         target_classes: []
         required_events: []
@@ -208,11 +250,20 @@ floors:
     waypoints:
       - id: "f20_demo_check"
         label: "F20 Demo Check"
+        point_type: "task"
+        dwell_s: 4.0
         pose:
           x: 2.0
           y: 0.0
+          z: 0.0
           yaw: 0.0
-        inspect_duration_s: 4.0
+        vendor_navigation:
+          PointInfo: 1
+          Gait: 12
+          Speed: 1
+          Manner: 0
+          ObsMode: 0
+          NavMode: 1
         camera: "front_wide"
         target_classes: ["person", "smoke"]
         required_events: []
@@ -272,11 +323,20 @@ floors:
     waypoints:
       - id: "f21_demo_check"
         label: "F21 Demo Check"
+        point_type: "task"
+        dwell_s: 4.0
         pose:
           x: 2.0
           y: 0.0
+          z: 0.0
           yaw: 0.0
-        inspect_duration_s: 4.0
+        vendor_navigation:
+          PointInfo: 1
+          Gait: 12
+          Speed: 1
+          Manner: 0
+          ObsMode: 0
+          NavMode: 1
         camera: "front_wide"
         target_classes: ["person", "smoke"]
         required_events: []

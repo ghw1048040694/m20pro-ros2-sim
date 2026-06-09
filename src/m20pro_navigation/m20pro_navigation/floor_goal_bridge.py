@@ -148,6 +148,17 @@ class FloorGoalBridge(Node):
                     continue
                 pose = waypoint.get("pose") or {}
                 try:
+                    point_type = str(waypoint.get("point_type") or waypoint.get("manual_point_type") or "task")
+                    dwell_s = float(
+                        waypoint.get(
+                            "dwell_s",
+                            waypoint.get("inspect_duration_s", 0.0),
+                        )
+                    )
+                    self.get_logger().info(
+                        "resolved waypoint id=%s floor=%s type=%s dwell=%.1fs"
+                        % (waypoint_id, floor_id, point_type, dwell_s)
+                    )
                     return (
                         floor_id,
                         float(pose.get("x", 0.0)),

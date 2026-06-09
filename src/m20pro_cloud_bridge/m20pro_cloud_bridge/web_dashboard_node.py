@@ -34,6 +34,50 @@ except ImportError:  # pragma: no cover - runtime dependency on the robot/operat
     cv2 = None
 
 
+MANUAL_POINT_TYPES: Dict[str, Dict[str, Any]] = {
+    "transition": {
+        "label": "过渡点",
+        "point_info": 0,
+        "default_dwell_s": 0.0,
+        "default_nav_mode": 0,
+    },
+    "task": {
+        "label": "任务点",
+        "point_info": 1,
+        "default_dwell_s": 5.0,
+        "default_nav_mode": 1,
+    },
+    "charge": {
+        "label": "充电点",
+        "point_info": 3,
+        "default_dwell_s": 0.0,
+        "default_nav_mode": 1,
+    },
+}
+
+UI_TYPE_TO_MANUAL_POINT_TYPE = {
+    "patrol": "task",
+    "task": "task",
+    "inspection": "task",
+    "transition": "transition",
+    "stair_entry": "transition",
+    "stair_switch": "transition",
+    "stair_exit": "transition",
+    "charge": "charge",
+    "charging": "charge",
+}
+
+DEFAULT_VENDOR_NAVIGATION = {
+    "Value": 0,
+    "MapID": 0,
+    "Gait": 12,
+    "Speed": 1,
+    "Manner": 0,
+    "ObsMode": 0,
+    "NavMode": 1,
+}
+
+
 INDEX_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -588,6 +632,14 @@ INDEX_HTML = r"""<!doctype html>
               </select>
             </div>
             <div class="row">
+              <label>手册类型</label>
+              <select id="manualPointType">
+                <option value="task">任务点</option>
+                <option value="transition">过渡点</option>
+                <option value="charge">充电点</option>
+              </select>
+            </div>
+            <div class="row">
               <label>楼层</label>
               <input id="markFloor" value="F20" />
             </div>
@@ -602,6 +654,30 @@ INDEX_HTML = r"""<!doctype html>
             <div class="row">
               <label>Yaw(rad)</label>
               <input id="markYaw" value="0.0" />
+            </div>
+            <div class="row">
+              <label>停留(s)</label>
+              <input id="markDwell" value="5.0" />
+            </div>
+            <div class="row">
+              <label>Gait</label>
+              <input id="markGait" value="12" />
+            </div>
+            <div class="row">
+              <label>Speed</label>
+              <input id="markSpeed" value="1" />
+            </div>
+            <div class="row">
+              <label>Manner</label>
+              <input id="markManner" value="0" />
+            </div>
+            <div class="row">
+              <label>ObsMode</label>
+              <input id="markObsMode" value="0" />
+            </div>
+            <div class="row">
+              <label>NavMode</label>
+              <input id="markNavMode" value="1" />
             </div>
             <div class="actions">
               <button class="primary" id="saveMarkBtn">保存点位</button>
@@ -659,6 +735,25 @@ INDEX_HTML = r"""<!doctype html>
       sessionId: null,
       clickPose: null
     };
+    const manualPointTypeNames = {
+      transition: "过渡点",
+      task: "任务点",
+      charge: "充电点"
+    };
+    const manualTypeByUiType = {
+      patrol: "task",
+      task: "task",
+      stair_entry: "transition",
+      stair_switch: "transition",
+      stair_exit: "transition",
+      transition: "transition",
+      charge: "charge"
+    };
+    const defaultByManualType = {
+      transition: { dwell: 0, gait: 12, speed: 1, manner: 0, obsMode: 0, navMode: 0 },
+      task: { dwell: 5, gait: 12, speed: 1, manner: 0, obsMode: 0, navMode: 1 },
+      charge: { dwell: 0, gait: 12, speed: 1, manner: 0, obsMode: 0, navMode: 1 }
+    };
     const typeNames = {
       patrol: "巡检点",
       stair_entry: "步态切换点",
@@ -689,6 +784,24 @@ INDEX_HTML = r"""<!doctype html>
     }
     function currentAnnotationMapId() {
       return state.selectedMapId || "live_map";
+    }
+    function asNumber(id, fallback) {
+      const value = Number($(id).value);
+      return Number.isFinite(value) ? value : fallback;
+    }
+    function asInteger(id, fallback) {
+      const value = Number.parseInt($(id).value, 10);
+      return Number.isFinite(value) ? value : fallback;
+    }
+    function syncManualDefaults(force) {
+      const manualType = $("manualPointType").value;
+      const defaults = defaultByManualType[manualType] || defaultByManualType.task;
+      if (force || !$("markDwell").value.trim()) $("markDwell").value = String(defaults.dwell);
+      if (force || !$("markGait").value.trim()) $("markGait").value = String(defaults.gait);
+      if (force || !$("markSpeed").value.trim()) $("markSpeed").value = String(defaults.speed);
+      if (force || !$("markManner").value.trim()) $("markManner").value = String(defaults.manner);
+      if (force || !$("markObsMode").value.trim()) $("markObsMode").value = String(defaults.obsMode);
+      if (force || !$("markNavMode").value.trim()) $("markNavMode").value = String(defaults.navMode);
     }
     async function fetchJson(url) {
       const res = await fetch(url, { cache: "no-store" });
@@ -994,7 +1107,7 @@ INDEX_HTML = r"""<!doctype html>
             <span>${item.label || typeNames[item.type] || item.id}</span>
             <span class="tag">${typeNames[item.type] || item.type}</span>
           </div>
-          <div class="item-meta">${item.floor || "-"} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, yaw ${fmtNumber(Number(pose.yaw), 2)}</div>
+          <div class="item-meta">${item.floor || "-"} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || "-"} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, yaw ${fmtNumber(Number(pose.yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</div>
           <div class="actions"><button class="danger" data-delete-mark="${item.id}">删除</button></div>
         `;
         box.appendChild(el);
@@ -1017,7 +1130,7 @@ INDEX_HTML = r"""<!doctype html>
       for (const item of state.annotations) {
         const line = document.createElement("label");
         line.className = "checkline";
-        line.innerHTML = `<input type="checkbox" value="${item.id}" checked><span>${item.floor || "-"} / ${item.label || item.id} / ${typeNames[item.type] || item.type}</span>`;
+        line.innerHTML = `<input type="checkbox" value="${item.id}" checked><span>${item.floor || "-"} / ${item.label || item.id} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || typeNames[item.type] || item.type} / yaw ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
         box.appendChild(line);
       }
     }
@@ -1135,6 +1248,12 @@ INDEX_HTML = r"""<!doctype html>
       } catch (err) { console.warn(err); }
     });
     $("reloadMapsBtn").addEventListener("click", loadMaps);
+    $("markType").addEventListener("change", () => {
+      const manualType = manualTypeByUiType[$("markType").value] || "task";
+      $("manualPointType").value = manualType;
+      syncManualDefaults(true);
+    });
+    $("manualPointType").addEventListener("change", () => syncManualDefaults(true));
     $("saveMarkBtn").addEventListener("click", async () => {
       try {
         if (!state.map) throw {message: "还没有地图，等地图加载后再保存点位"};
@@ -1153,6 +1272,15 @@ INDEX_HTML = r"""<!doctype html>
             y,
             z: 0,
             yaw: Number.isFinite(yaw) ? yaw : 0
+          },
+          manual_point_type: $("manualPointType").value,
+          dwell_s: asNumber("markDwell", 0),
+          vendor_navigation: {
+            Gait: asInteger("markGait", 12),
+            Speed: asInteger("markSpeed", 1),
+            Manner: asInteger("markManner", 0),
+            ObsMode: asInteger("markObsMode", 0),
+            NavMode: asInteger("markNavMode", 1)
           }
         });
         await loadAnnotations();
@@ -1189,6 +1317,7 @@ INDEX_HTML = r"""<!doctype html>
     });
     window.addEventListener("resize", resizeCanvas);
     resizeCanvas();
+    syncManualDefaults(false);
     loadMaps().then(loadAnnotations).then(loadTasks).catch(console.warn);
     mainLoop();
   </script>
@@ -1460,6 +1589,11 @@ class WebDashboardNode(Node):
             str(self.get_parameter("cmd_vel_topic").value),
             10,
         )
+        self.active_waypoint_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("active_waypoint_topic").value),
+            10,
+        )
 
         self._state: Dict[str, Any] = {
             "floor": None,
@@ -1505,8 +1639,12 @@ class WebDashboardNode(Node):
         self.declare_parameter("mapping_command_timeout_s", 120.0)
         self.declare_parameter("map_import_timeout_s", 180.0)
         self.declare_parameter("goal_reached_tolerance_m", 0.6)
+        self.declare_parameter("default_task_dwell_s", 5.0)
+        self.declare_parameter("default_transition_dwell_s", 0.0)
+        self.declare_parameter("default_charge_dwell_s", 0.0)
         self.declare_parameter("floor_goal_topic", "/m20pro/floor_goal")
         self.declare_parameter("stop_task_topic", "/m20pro/stop_task")
+        self.declare_parameter("active_waypoint_topic", "/m20pro/active_waypoint")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
@@ -1564,6 +1702,12 @@ class WebDashboardNode(Node):
     def _normalize_runtime_state_on_startup(self) -> None:
         active = self._settings.get("active_task") or {}
         changed = False
+        for item in self._annotations:
+            before = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            self._normalize_annotation_semantics(item)
+            after = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if before != after:
+                changed = True
         if active:
             task_id = active.get("task_id")
             task = self._find_by_id(self._tasks, task_id)
@@ -1580,6 +1724,7 @@ class WebDashboardNode(Node):
         if changed:
             self._save_json("settings.json", self._settings)
             self._save_json("tasks.json", self._tasks)
+            self._save_json("annotations.json", self._annotations)
 
     def _append_event(self, text: str, parsed: Optional[Dict[str, Any]] = None) -> None:
         max_events = int(self.get_parameter("max_events").value)
@@ -2061,8 +2206,15 @@ class WebDashboardNode(Node):
             "floor": floor,
             "label": str(payload.get("label") or "").strip(),
             "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
+            "dwell_s": self._resolve_dwell_s(payload),
+            "manual_point_type": self._manual_point_type_from_payload(payload),
+            "vendor_navigation": self._vendor_navigation_from_payload(payload),
+            "camera": str(payload.get("camera") or "").strip(),
+            "target_classes": self._string_list(payload.get("target_classes")),
+            "notes": str(payload.get("notes") or "").strip(),
             "created_at": _now_text(),
         }
+        self._normalize_annotation_semantics(item)
         if not item["label"]:
             item["label"] = f"{floor}_{item['type']}_{len(self._annotations) + 1}"
         with self._data_lock:
@@ -2070,6 +2222,102 @@ class WebDashboardNode(Node):
             self._save_json("annotations.json", self._annotations)
         self._append_event("保存地图点位", {"annotation_id": item["id"], "floor": floor, "type": item["type"]})
         return {"ok": True, "annotation": item}
+
+    def _manual_point_type_from_payload(self, payload: Dict[str, Any]) -> str:
+        value = str(payload.get("manual_point_type") or "").strip()
+        if value in MANUAL_POINT_TYPES:
+            return value
+        legacy_type = str(payload.get("type") or "patrol").strip()
+        return UI_TYPE_TO_MANUAL_POINT_TYPE.get(legacy_type, "task")
+
+    def _resolve_dwell_s(self, payload: Dict[str, Any]) -> float:
+        raw = payload.get("dwell_s", payload.get("inspect_duration_s", payload.get("stay_duration_s")))
+        if raw is not None and str(raw).strip() != "":
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                return 0.0
+        manual_type = self._manual_point_type_from_payload(payload)
+        if manual_type == "transition":
+            return max(0.0, float(self.get_parameter("default_transition_dwell_s").value))
+        if manual_type == "charge":
+            return max(0.0, float(self.get_parameter("default_charge_dwell_s").value))
+        return max(0.0, float(self.get_parameter("default_task_dwell_s").value))
+
+    def _vendor_navigation_from_payload(self, payload: Dict[str, Any]) -> Dict[str, int]:
+        manual_type = self._manual_point_type_from_payload(payload)
+        defaults = dict(DEFAULT_VENDOR_NAVIGATION)
+        defaults["PointInfo"] = int(MANUAL_POINT_TYPES[manual_type]["point_info"])
+        defaults["NavMode"] = int(MANUAL_POINT_TYPES[manual_type]["default_nav_mode"])
+        raw = payload.get("vendor_navigation") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        aliases = {
+            "value": "Value",
+            "map_id": "MapID",
+            "point_info": "PointInfo",
+            "gait": "Gait",
+            "speed": "Speed",
+            "manner": "Manner",
+            "obs_mode": "ObsMode",
+            "nav_mode": "NavMode",
+        }
+        for key, canonical in aliases.items():
+            if key in payload:
+                raw[canonical] = payload[key]
+        for key in list(defaults.keys()) + ["PointInfo"]:
+            if key not in raw:
+                continue
+            try:
+                defaults[key] = int(raw[key])
+            except (TypeError, ValueError):
+                pass
+        return defaults
+
+    def _normalize_annotation_semantics(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        legacy_type = str(item.get("type") or "patrol").strip()
+        manual_type = str(item.get("manual_point_type") or "").strip()
+        if manual_type not in MANUAL_POINT_TYPES:
+            manual_type = UI_TYPE_TO_MANUAL_POINT_TYPE.get(legacy_type, "task")
+        item["manual_point_type"] = manual_type
+
+        vendor = item.get("vendor_navigation")
+        if not isinstance(vendor, dict):
+            vendor = {}
+        merged = dict(DEFAULT_VENDOR_NAVIGATION)
+        merged["PointInfo"] = int(MANUAL_POINT_TYPES[manual_type]["point_info"])
+        merged["NavMode"] = int(MANUAL_POINT_TYPES[manual_type]["default_nav_mode"])
+        for key in merged:
+            if key not in vendor:
+                continue
+            try:
+                merged[key] = int(vendor[key])
+            except (TypeError, ValueError):
+                pass
+        item["vendor_navigation"] = merged
+
+        if "dwell_s" not in item and "inspect_duration_s" in item:
+            item["dwell_s"] = item.get("inspect_duration_s")
+        try:
+            item["dwell_s"] = max(0.0, float(item.get("dwell_s", MANUAL_POINT_TYPES[manual_type]["default_dwell_s"])))
+        except (TypeError, ValueError):
+            item["dwell_s"] = float(MANUAL_POINT_TYPES[manual_type]["default_dwell_s"])
+        item["inspect_duration_s"] = item["dwell_s"]
+
+        if "camera" not in item:
+            item["camera"] = ""
+        item["target_classes"] = self._string_list(item.get("target_classes"))
+        return item
+
+    @staticmethod
+    def _string_list(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
 
     def _delete_annotation(self, annotation_id: str) -> Dict[str, Any]:
         if not annotation_id:
@@ -2108,10 +2356,15 @@ class WebDashboardNode(Node):
         if not annotation_ids:
             return self._error("任务至少需要一个点位")
         with self._data_lock:
-            known = {item["id"] for item in self._annotations}
+            known = {item["id"]: item for item in self._annotations}
             missing = [item for item in annotation_ids if item not in known]
             if missing:
                 return self._error("任务中存在已删除的点位", {"missing": missing})
+            validation_error = self._validate_task_annotation_order(
+                [known[item] for item in annotation_ids]
+            )
+            if validation_error:
+                return validation_error
             task = {
                 "id": _new_id("task"),
                 "name": str(payload.get("name") or "巡检任务").strip(),
@@ -2144,6 +2397,11 @@ class WebDashboardNode(Node):
                 task["updated_at"] = _now_text()
                 self._save_json("tasks.json", self._tasks)
                 return self._error("任务中存在已删除的点位，请重新生成任务", {"missing": missing})
+            validation_error = self._validate_task_annotation_order(
+                [known[item] for item in task.get("annotation_ids") or []]
+            )
+            if validation_error:
+                return validation_error
             selected_map_id = self._settings.get("selected_map_id") or "live_map"
             task_map_id = str(task.get("map_id") or "").strip() or selected_map_id
             if task_map_id != selected_map_id:
@@ -2160,6 +2418,7 @@ class WebDashboardNode(Node):
                 "annotation_ids": list(task.get("annotation_ids") or []),
                 "started_at": _now_text(),
                 "last_goal_annotation_id": None,
+                "phase": "navigating",
             }
             self._settings["active_task"] = active
             task["status"] = "running"
@@ -2196,6 +2455,13 @@ class WebDashboardNode(Node):
         annotation = self._active_annotation(active)
         if annotation is None:
             return
+        if active.get("phase") == "dwelling":
+            until = float(active.get("dwell_until", 0.0) or 0.0)
+            if time.time() < until:
+                self._publish_active_waypoint(annotation, active, "dwelling")
+                return
+            self._advance_active_task(annotation)
+            return
         with self._lock:
             pose = dict(self._state.get("pose") or {})
             current_floor = self._state.get("floor")
@@ -2211,25 +2477,57 @@ class WebDashboardNode(Node):
         except (KeyError, TypeError, ValueError):
             return
         if distance <= float(self.get_parameter("goal_reached_tolerance_m").value):
-            completed_task_id = None
-            with self._data_lock:
-                active = self._settings.get("active_task") or {}
-                active["index"] = int(active.get("index", 0)) + 1
-                active["last_reached_at"] = _now_text()
-                if active["index"] >= len(active.get("annotation_ids") or []):
-                    active["status"] = "completed"
-                    self._mark_task_status(active.get("task_id"), "completed")
-                    completed_task_id = active.get("task_id")
-                else:
-                    active["last_goal_annotation_id"] = None
-                self._settings["active_task"] = None if completed_task_id else active
-                self._save_json("settings.json", self._settings)
-                self._save_json("tasks.json", self._tasks)
-            if completed_task_id:
-                self._append_event("前端任务完成", {"task_id": completed_task_id})
-            self._dispatch_active_goal(force=True)
+            dwell_s = self._annotation_dwell_s(annotation)
+            if dwell_s > 0.0:
+                with self._data_lock:
+                    active = self._settings.get("active_task") or {}
+                    if active.get("status") != "running":
+                        return
+                    active["phase"] = "dwelling"
+                    active["dwell_s"] = dwell_s
+                    active["dwell_until"] = time.time() + dwell_s
+                    active["last_reached_at"] = _now_text()
+                    active["last_reached_annotation_id"] = annotation.get("id")
+                    self._settings["active_task"] = active
+                    self._save_json("settings.json", self._settings)
+                self._append_event(
+                    "到达点位并开始停留",
+                    {
+                        "annotation_id": annotation.get("id"),
+                        "label": annotation.get("label"),
+                        "dwell_s": dwell_s,
+                    },
+                )
+                self._publish_active_waypoint(annotation, active, "dwelling")
+                return
+            self._advance_active_task(annotation)
         else:
             self._dispatch_active_goal(force=False)
+
+    def _advance_active_task(self, annotation: Dict[str, Any]) -> None:
+        completed_task_id = None
+        with self._data_lock:
+            active = self._settings.get("active_task") or {}
+            if active.get("status") != "running":
+                return
+            active["index"] = int(active.get("index", 0)) + 1
+            active["phase"] = "navigating"
+            active["dwell_s"] = 0.0
+            active["dwell_until"] = None
+            active["last_reached_at"] = _now_text()
+            active["last_reached_annotation_id"] = annotation.get("id")
+            if active["index"] >= len(active.get("annotation_ids") or []):
+                active["status"] = "completed"
+                self._mark_task_status(active.get("task_id"), "completed")
+                completed_task_id = active.get("task_id")
+            else:
+                active["last_goal_annotation_id"] = None
+            self._settings["active_task"] = None if completed_task_id else active
+            self._save_json("settings.json", self._settings)
+            self._save_json("tasks.json", self._tasks)
+        if completed_task_id:
+            self._append_event("前端任务完成", {"task_id": completed_task_id})
+        self._dispatch_active_goal(force=True)
 
     def _dispatch_active_goal(self, force: bool) -> None:
         with self._data_lock:
@@ -2254,11 +2552,16 @@ class WebDashboardNode(Node):
             return
         with self._data_lock:
             active = self._settings.get("active_task") or {}
+            if active.get("status") != "running" or active.get("task_id") is None:
+                return
             active["last_goal_annotation_id"] = annotation.get("id")
             active["last_goal_label"] = annotation.get("label")
             active["last_goal_sent_at"] = _now_text()
+            active["phase"] = "navigating"
+            active["last_goal_semantics"] = self._annotation_semantics_payload(annotation)
             self._settings["active_task"] = active
             self._save_json("settings.json", self._settings)
+        self._publish_active_waypoint(annotation, active, "navigating")
 
     def _publish_floor_goal(self, floor: str, x: float, y: float, yaw: float, z: float = 0.0) -> None:
         if not floor:
@@ -2272,6 +2575,80 @@ class WebDashboardNode(Node):
         _yaw_to_orientation(msg, yaw)
         self.floor_goal_pub.publish(msg)
         self.get_logger().info("web task published floor goal floor=%s x=%.2f y=%.2f yaw=%.2f" % (floor, x, y, yaw))
+
+    def _publish_active_waypoint(
+        self,
+        annotation: Dict[str, Any],
+        active: Dict[str, Any],
+        phase: str,
+    ) -> None:
+        payload = {
+            "task_id": active.get("task_id"),
+            "task_name": active.get("task_name"),
+            "phase": phase,
+            "index": int(active.get("index", 0)),
+            "remaining_dwell_s": self._remaining_dwell_s(active),
+            "waypoint": self._annotation_semantics_payload(annotation),
+            "updated_at": _now_text(),
+        }
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self.active_waypoint_pub.publish(msg)
+
+    def _annotation_semantics_payload(self, annotation: Dict[str, Any]) -> Dict[str, Any]:
+        self._normalize_annotation_semantics(annotation)
+        pose = annotation.get("pose") or {}
+        vendor = dict(annotation.get("vendor_navigation") or {})
+        try:
+            vendor["PosX"] = float(pose.get("x", 0.0))
+            vendor["PosY"] = float(pose.get("y", 0.0))
+            vendor["PosZ"] = float(pose.get("z", 0.0))
+            vendor["AngleYaw"] = float(pose.get("yaw", 0.0))
+        except (TypeError, ValueError):
+            pass
+        return {
+            "id": annotation.get("id"),
+            "label": annotation.get("label"),
+            "floor": annotation.get("floor"),
+            "type": annotation.get("type"),
+            "manual_point_type": annotation.get("manual_point_type"),
+            "manual_point_type_label": MANUAL_POINT_TYPES[annotation["manual_point_type"]]["label"],
+            "pose": dict(pose),
+            "yaw": float(pose.get("yaw", 0.0) or 0.0),
+            "dwell_s": self._annotation_dwell_s(annotation),
+            "camera": annotation.get("camera"),
+            "target_classes": list(annotation.get("target_classes") or []),
+            "vendor_navigation": vendor,
+        }
+
+    def _annotation_dwell_s(self, annotation: Dict[str, Any]) -> float:
+        self._normalize_annotation_semantics(annotation)
+        try:
+            return max(0.0, float(annotation.get("dwell_s", 0.0)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _remaining_dwell_s(active: Dict[str, Any]) -> float:
+        if active.get("phase") != "dwelling":
+            return 0.0
+        try:
+            return max(0.0, float(active.get("dwell_until", 0.0)) - time.time())
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _validate_task_annotation_order(
+        self,
+        annotations: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        for index, annotation in enumerate(annotations):
+            self._normalize_annotation_semantics(annotation)
+            if annotation.get("manual_point_type") == "charge" and index != len(annotations) - 1:
+                return self._error(
+                    "充电点必须放在任务最后。开发手册说明充电点到达后会自动进入充电并保持，不能继续串后续点位。",
+                    {"annotation_id": annotation.get("id"), "label": annotation.get("label")},
+                )
+        return None
 
     def _active_annotation(self, active: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ids = active.get("annotation_ids") or []

@@ -42,3 +42,4 @@ source install/setup.bash
 - 这些脚本不重启原厂 multicast 服务。
 - `104_stop_web.sh` 只停止网页前端。
 - `104_stop_real.sh` 停止本工程 real launch，不停止原厂服务。
+- 录包脚本会记录 `/m20pro/active_waypoint`，里面包含当前任务点类型、yaw、停留时间和开发手册对应的导航字段。

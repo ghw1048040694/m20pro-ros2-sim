@@ -111,6 +111,54 @@ class ConfigAuditNode(Node):
                 warnings.append(
                     "floor %s map differs between manifest and route config" % floor_id
                 )
+            self._check_waypoint_semantics(floor_id, floor_config["floors"][floor_id], warnings)
+
+    def _check_waypoint_semantics(
+        self,
+        floor_id: str,
+        floor: Dict[str, Any],
+        warnings: List[str],
+    ) -> None:
+        waypoints = floor.get("waypoints") or []
+        if not isinstance(waypoints, list):
+            warnings.append("floor %s waypoints is not a list" % floor_id)
+            return
+        for index, waypoint in enumerate(waypoints):
+            if not isinstance(waypoint, dict):
+                warnings.append("floor %s waypoint %d is not a mapping" % (floor_id, index))
+                continue
+            waypoint_id = str(waypoint.get("id") or "<unnamed>")
+            pose = waypoint.get("pose") or {}
+            if not isinstance(pose, dict):
+                warnings.append("floor %s waypoint %s pose is not a mapping" % (floor_id, waypoint_id))
+                continue
+            for key in ("x", "y", "yaw"):
+                if key not in pose:
+                    warnings.append("floor %s waypoint %s missing pose.%s" % (floor_id, waypoint_id, key))
+            point_type = str(waypoint.get("point_type") or waypoint.get("manual_point_type") or "").strip()
+            if point_type not in ("transition", "task", "charge"):
+                warnings.append(
+                    "floor %s waypoint %s has no manual point_type transition/task/charge"
+                    % (floor_id, waypoint_id)
+                )
+            if point_type == "task" and "dwell_s" not in waypoint and "inspect_duration_s" not in waypoint:
+                warnings.append(
+                    "floor %s task waypoint %s has no dwell_s/inspect_duration_s"
+                    % (floor_id, waypoint_id)
+                )
+            vendor = waypoint.get("vendor_navigation") or {}
+            if isinstance(vendor, dict):
+                for key in ("PointInfo", "Gait", "Speed", "Manner", "ObsMode", "NavMode"):
+                    if key not in vendor:
+                        warnings.append(
+                            "floor %s waypoint %s missing vendor_navigation.%s"
+                            % (floor_id, waypoint_id, key)
+                        )
+            else:
+                warnings.append(
+                    "floor %s waypoint %s vendor_navigation is not a mapping"
+                    % (floor_id, waypoint_id)
+                )
 
 
 def main(args: Optional[list] = None) -> None:
