@@ -1,3 +1,6 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -6,10 +9,13 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
+    bringup_share = get_package_share_directory("m20pro_bringup")
+
     host = LaunchConfiguration("host")
     port = LaunchConfiguration("port")
     data_dir = LaunchConfiguration("data_dir")
     map_archive_dir = LaunchConfiguration("map_archive_dir")
+    map_manifest = LaunchConfiguration("map_manifest")
     factory_host = LaunchConfiguration("factory_host")
     factory_user = LaunchConfiguration("factory_user")
     factory_active_map = LaunchConfiguration("factory_active_map")
@@ -29,6 +35,10 @@ def generate_launch_description():
         DeclareLaunchArgument("port", default_value="8080"),
         DeclareLaunchArgument("data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("map_archive_dir", default_value="~/m20pro_maps"),
+        DeclareLaunchArgument(
+            "map_manifest",
+            default_value=os.path.join(bringup_share, "config", "map_manifest.yaml"),
+        ),
         DeclareLaunchArgument("factory_host", default_value="10.21.31.106"),
         DeclareLaunchArgument("factory_user", default_value="user"),
         DeclareLaunchArgument(
@@ -78,6 +88,7 @@ def generate_launch_description():
                     "port": port,
                     "data_dir": data_dir,
                     "map_archive_dir": map_archive_dir,
+                    "map_manifest": map_manifest,
                     "factory_host": factory_host,
                     "factory_user": factory_user,
                     "factory_active_map": factory_active_map,

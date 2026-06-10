@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import rclpy
 import yaml
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from geometry_msgs.msg import Pose, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path as RosPath
 from rclpy.node import Node
@@ -608,11 +609,11 @@ INDEX_HTML = r"""<!doctype html>
               <button id="reloadMapsBtn">刷新列表</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              不选择归档地图时页面显示实时 `/map`；选择归档地图后，可直接在这张图上标点。
+              不选择固定地图时页面显示实时 `/map`；选择项目内置地图或从 106 拉取的地图后，可直接在这张图上标点。
             </div>
           </div>
           <div class="section">
-            <h2>已归档地图</h2>
+            <h2>地图列表</h2>
             <div id="mapList" class="list"></div>
           </div>
         </section>
@@ -648,11 +649,11 @@ INDEX_HTML = r"""<!doctype html>
               <input id="markLabel" placeholder="例如 F20 楼梯上行切换点" />
             </div>
             <div class="row">
-              <label>X / Y</label>
+              <label>坐标 X/Y</label>
               <input id="markXY" placeholder="点击地图自动填入" />
             </div>
             <div class="row">
-              <label>Yaw(rad)</label>
+              <label>朝向角(rad)</label>
               <input id="markYaw" value="0.0" />
             </div>
             <div class="row">
@@ -660,24 +661,38 @@ INDEX_HTML = r"""<!doctype html>
               <input id="markDwell" value="5.0" />
             </div>
             <div class="row">
-              <label>Gait</label>
-              <input id="markGait" value="12" />
+              <label>步态</label>
+              <select id="markGait">
+                <option value="12">平地敏捷（12）</option>
+              </select>
             </div>
             <div class="row">
-              <label>Speed</label>
-              <input id="markSpeed" value="1" />
+              <label>速度</label>
+              <select id="markSpeed">
+                <option value="1">低速（1）</option>
+                <option value="2">高速（2）</option>
+              </select>
             </div>
             <div class="row">
-              <label>Manner</label>
-              <input id="markManner" value="0" />
+              <label>行走方式</label>
+              <select id="markManner">
+                <option value="0">前进（0）</option>
+                <option value="1">倒退（1）</option>
+              </select>
             </div>
             <div class="row">
-              <label>ObsMode</label>
-              <input id="markObsMode" value="0" />
+              <label>停避障</label>
+              <select id="markObsMode">
+                <option value="0">开启（0）</option>
+                <option value="1">关闭（1）</option>
+              </select>
             </div>
             <div class="row">
-              <label>NavMode</label>
-              <input id="markNavMode" value="1" />
+              <label>导航方式</label>
+              <select id="markNavMode">
+                <option value="1">自主导航（1）</option>
+                <option value="0">直线导航（0）</option>
+              </select>
             </div>
             <div class="actions">
               <button class="primary" id="saveMarkBtn">保存点位</button>
@@ -1010,9 +1025,9 @@ INDEX_HTML = r"""<!doctype html>
       state.mapImage = buildMapImage(map);
       state.selectedMapId = mapId;
       state.fileMapVersion = map.version;
-      $("mapTitle").textContent = map.name || `归档地图 ${mapId}`;
+      $("mapTitle").textContent = map.name || `固定地图 ${mapId}`;
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
-      $("mapMode").textContent = "归档地图";
+      $("mapMode").textContent = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
       await loadAnnotations();
       draw();
     }
@@ -1021,7 +1036,7 @@ INDEX_HTML = r"""<!doctype html>
       $("floor").textContent = text(s.floor);
       $("stair").textContent = text(s.stair_status);
       $("gait").textContent = text(s.gait_command);
-      if (s.pose) $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / yaw ${fmtNumber(s.pose.yaw_deg, 0)}°`;
+      if (s.pose) $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / 朝向 ${fmtNumber(s.pose.yaw_deg, 0)}°`;
       else $("pose").textContent = "-";
       $("nav").textContent = JSON.stringify({
         路径点数: s.path ? s.path.points.length : 0,
@@ -1060,7 +1075,8 @@ INDEX_HTML = r"""<!doctype html>
       for (const map of state.maps) {
         const opt = document.createElement("option");
         opt.value = map.id;
-        opt.textContent = `${map.name || map.id} (${map.floor || "-"})`;
+        const sourceText = map.source === "project_builtin" ? "项目内置" : "106归档";
+        opt.textContent = `${map.name || map.id} (${map.floor || "-"} / ${sourceText})`;
         select.appendChild(opt);
       }
       select.value = selected;
@@ -1071,15 +1087,17 @@ INDEX_HTML = r"""<!doctype html>
       const box = $("mapList");
       box.innerHTML = "";
       if (!state.maps.length) {
-        box.innerHTML = `<div class="small">还没有从 106 拉取归档地图。</div>`;
+        box.innerHTML = `<div class="small">当前没有可选固定地图，可先使用实时 /map 或从 106 拉取地图。</div>`;
         return;
       }
       for (const map of state.maps) {
         const el = document.createElement("div");
         el.className = "item";
+        const sourceText = map.source === "project_builtin" ? "项目内置" : "106 归档";
+        const note = map.source_note ? `<br>${map.source_note}` : "";
         el.innerHTML = `
           <div class="item-head"><span>${map.name || map.id}</span><span class="tag">${map.floor || "-"}</span></div>
-          <div class="item-meta">${map.yaml_path || ""}<br>${map.created_at || ""}</div>
+          <div class="item-meta">${sourceText} / ${map.yaml_path || ""}<br>${map.created_at || ""}${note}</div>
         `;
         box.appendChild(el);
       }
@@ -1107,7 +1125,7 @@ INDEX_HTML = r"""<!doctype html>
             <span>${item.label || typeNames[item.type] || item.id}</span>
             <span class="tag">${typeNames[item.type] || item.type}</span>
           </div>
-          <div class="item-meta">${item.floor || "-"} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || "-"} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, yaw ${fmtNumber(Number(pose.yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</div>
+          <div class="item-meta">${item.floor || "-"} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || "-"} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, 朝向 ${fmtNumber(Number(pose.yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</div>
           <div class="actions"><button class="danger" data-delete-mark="${item.id}">删除</button></div>
         `;
         box.appendChild(el);
@@ -1130,7 +1148,7 @@ INDEX_HTML = r"""<!doctype html>
       for (const item of state.annotations) {
         const line = document.createElement("label");
         line.className = "checkline";
-        line.innerHTML = `<input type="checkbox" value="${item.id}" checked><span>${item.floor || "-"} / ${item.label || item.id} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || typeNames[item.type] || item.type} / yaw ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
+        line.innerHTML = `<input type="checkbox" value="${item.id}" checked><span>${item.floor || "-"} / ${item.label || item.id} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || typeNames[item.type] || item.type} / 朝向 ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
         box.appendChild(line);
       }
     }
@@ -1566,6 +1584,7 @@ class WebDashboardNode(Node):
 
         self._projects = self._load_json("projects.json", [])
         self._maps = self._load_json("maps.json", [])
+        self._builtin_maps = self._load_builtin_maps()
         self._annotations = self._load_json("annotations.json", [])
         self._tasks = self._load_json("tasks.json", [])
         self._sessions = self._load_json("mapping_sessions.json", [])
@@ -1618,6 +1637,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("port", 8080)
         self.declare_parameter("data_dir", "~/.m20pro_web")
         self.declare_parameter("map_archive_dir", "~/m20pro_maps")
+        self.declare_parameter("map_manifest", "")
         self.declare_parameter("factory_host", "10.21.31.106")
         self.declare_parameter("factory_user", "user")
         self.declare_parameter("factory_active_map", "/var/opt/robot/data/maps/active")
@@ -1698,6 +1718,86 @@ class WebDashboardNode(Node):
         with tmp.open("w", encoding="utf-8") as file:
             json.dump(value, file, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
+
+    def _load_builtin_maps(self) -> List[Dict[str, Any]]:
+        manifest_path = self._map_manifest_path()
+        if manifest_path is None or not manifest_path.exists():
+            return []
+        try:
+            with manifest_path.open("r", encoding="utf-8") as file:
+                manifest = yaml.safe_load(file) or {}
+        except Exception as exc:
+            self.get_logger().warning(f"failed to read map manifest {manifest_path}: {exc}")
+            return []
+
+        map_set = manifest.get("map_set") or {}
+        source_note = str(map_set.get("source_note") or "").strip()
+        maps: List[Dict[str, Any]] = []
+        floors = manifest.get("floors") or {}
+        if not isinstance(floors, dict):
+            return []
+        for floor, info in floors.items():
+            if not isinstance(info, dict):
+                continue
+            yaml_value = str(info.get("map_yaml") or "").strip()
+            if not yaml_value:
+                continue
+            try:
+                yaml_path = FsPath(self._resolve_path(yaml_value))
+            except Exception as exc:
+                self.get_logger().warning(f"failed to resolve builtin map {floor}: {exc}")
+                continue
+            maps.append(
+                {
+                    "id": f"builtin_{floor}",
+                    "name": str(info.get("label") or floor),
+                    "floor": str(floor),
+                    "level": info.get("level"),
+                    "directory": str(yaml_path.parent),
+                    "yaml_path": str(yaml_path),
+                    "source": "project_builtin",
+                    "readonly": True,
+                    "source_note": source_note,
+                    "created_at": "项目内置地图",
+                }
+            )
+        maps.sort(key=lambda item: (int(item.get("level") or 0), str(item.get("floor") or "")))
+        return maps
+
+    def _map_manifest_path(self) -> Optional[FsPath]:
+        value = str(self.get_parameter("map_manifest").value or "").strip()
+        if value:
+            return FsPath(os.path.expandvars(os.path.expanduser(self._resolve_path(value))))
+        try:
+            return FsPath(get_package_share_directory("m20pro_bringup")) / "config" / "map_manifest.yaml"
+        except PackageNotFoundError:
+            return None
+
+    def _resolve_path(self, value: str) -> str:
+        path = os.path.expandvars(os.path.expanduser(str(value).strip()))
+        if path.startswith("package://"):
+            package_and_path = path[len("package://") :]
+            package_name, _, relative_path = package_and_path.partition("/")
+            if not package_name or not relative_path:
+                raise ValueError(f"invalid package path: {value}")
+            return os.path.join(get_package_share_directory(package_name), relative_path)
+        return path
+
+    def _all_maps_unlocked(self) -> List[Dict[str, Any]]:
+        archived_ids = {item.get("id") for item in self._maps}
+        return [
+            dict(item)
+            for item in self._builtin_maps
+            if item.get("id") not in archived_ids
+        ] + [dict(item) for item in self._maps]
+
+    def _find_map_record_unlocked(self, map_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not map_id:
+            return None
+        record = self._find_by_id(self._maps, map_id)
+        if record is not None:
+            return record
+        return self._find_by_id(self._builtin_maps, map_id)
 
     def _normalize_runtime_state_on_startup(self) -> None:
         active = self._settings.get("active_task") or {}
@@ -1937,7 +2037,7 @@ class WebDashboardNode(Node):
         with self._data_lock:
             return {
                 "ok": True,
-                "maps": list(self._maps),
+                "maps": self._all_maps_unlocked(),
                 "selected_map_id": self._settings.get("selected_map_id"),
             }
 
@@ -1947,7 +2047,7 @@ class WebDashboardNode(Node):
             active = self._settings.get("active_task") or {}
             if active.get("status") == "running":
                 return self._error("任务执行中不能切换地图，请先停止当前任务")
-            if map_id and not self._find_by_id(self._maps, map_id):
+            if map_id and not self._find_map_record_unlocked(map_id):
                 return self._error("地图不存在")
             self._settings["selected_map_id"] = map_id
             self._save_json("settings.json", self._settings)
@@ -2191,14 +2291,14 @@ class WebDashboardNode(Node):
         if map_id == "live_map":
             map_id = "live_map"
         with self._data_lock:
-            if map_id and map_id != "live_map" and not self._find_by_id(self._maps, map_id):
+            if map_id and map_id != "live_map" and not self._find_map_record_unlocked(map_id):
                 return self._error("地图不存在")
             if not map_id:
                 map_id = self._settings.get("selected_map_id")
             if not map_id and self._state.get("map"):
                 map_id = "live_map"
             if not map_id:
-                return self._error("没有可用地图，请等待实时 /map 或先选择归档地图")
+                return self._error("没有可用地图，请等待实时 /map 或先选择固定地图")
         item = {
             "id": _new_id("point"),
             "map_id": map_id,
@@ -2749,10 +2849,10 @@ class WebDashboardNode(Node):
         with self._data_lock:
             if not map_id:
                 map_id = self._settings.get("selected_map_id")
-            record = self._find_by_id(self._maps, map_id)
+            record = self._find_map_record_unlocked(map_id)
         if record is None:
             return {"available": False, "message": "map not selected"}
-        yaml_path = FsPath(record.get("yaml_path") or "")
+        yaml_path = FsPath(self._resolve_path(str(record.get("yaml_path") or "")))
         try:
             return self._load_map_file_payload(record, yaml_path)
         except Exception as exc:
@@ -2810,6 +2910,7 @@ class WebDashboardNode(Node):
             "map_id": record.get("id"),
             "name": record.get("name"),
             "floor": record.get("floor"),
+            "source": record.get("source"),
             "version": version,
             "frame_id": "map",
             "width": width,

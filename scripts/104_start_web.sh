@@ -14,5 +14,6 @@ source install/setup.bash
 set -u
 
 exec ros2 launch m20pro_bringup m20pro_web_dashboard.launch.py \
+  host:=0.0.0.0 \
   port:="${PORT}" \
   enable_camera_proxy:=false

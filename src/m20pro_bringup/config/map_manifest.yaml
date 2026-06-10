@@ -6,11 +6,11 @@
 
 map_set:
   name: "F19_F20_F21_shared_stair"
-  description: "F20 recorded map reused for F19/F21 during current multi-floor validation."
+  description: "当前多楼层验证阶段使用 F19/F20/F21 三个楼层入口。"
   default_floor: "F20"
   frame_id: "map"
   global_pcd: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"
-  source_note: "Current F19 and F21 maps reuse the edited F20 map products."
+  source_note: "当前 F19 和 F21 仍复用编辑后的 F20 地图产品，正式交付前应替换为各楼层实测建图结果。"
 
 floors:
   F19:

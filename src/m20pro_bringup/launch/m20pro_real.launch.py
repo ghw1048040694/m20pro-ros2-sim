@@ -406,6 +406,7 @@ def generate_launch_description():
                     "port": web_dashboard_port,
                     "data_dir": web_dashboard_data_dir,
                     "map_archive_dir": web_dashboard_map_archive_dir,
+                    "map_manifest": map_manifest,
                     "factory_host": factory_host,
                     "factory_user": factory_user,
                     "factory_active_map": factory_active_map,
