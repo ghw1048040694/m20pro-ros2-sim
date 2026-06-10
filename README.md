@@ -10,7 +10,7 @@
 详细调试日志、实测记录、问题排查过程放在：
 
 ```text
-/home/fabu/桌面/M20Pro运行数据/m20pro_20260604_104257.md
+m20pro日志.md
 ```
 
 现场执行脚本 Word 放在：
@@ -300,4 +300,4 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
 - 真机第一次测试先用 `enable_axis_command:=false`。
 - `scripts/` 是现场人工脚本入口。
 - `src/m20pro_bringup/scripts/` 是 ROS package 内部脚本。
-- README 只保留上手和使用说明；过程记录统一写入 `/home/fabu/桌面/M20Pro运行数据/` 下的 markdown。
+- README 只保留上手和使用说明；过程记录统一写入仓库根目录 `m20pro日志.md`。
