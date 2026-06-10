@@ -5161,3 +5161,16 @@ source install/setup.bash
 - Verified the regenerated docx text:
   - old titles `原厂常规模式录包`, `原厂导航模式录包`, and `我们的 real 影子导航测试` are no longer present;
   - new tasks are numbered 1/2/3 as above.
+
+## 2026-06-10 104 cleanup before field test
+
+- User confirmed they can manually SSH into 104 and see `/LIDAR/POINTS`; no DDS/FastDDS, multicast, or point-cloud configuration was changed.
+- Cleaned coworker DDDMR deployment leftovers from 104:
+  - `/home/user/m20_deploy/dddmr_code.tar.gz`;
+  - `/home/user/m20_deploy/dddmr_arm64_rk3588.tar.gz`;
+  - `/home/user/m20_deploy/start_dddmr_container.sh`;
+  - `/home/user/m20_deploy/M20_DDDMR_实机部署完整操作指南.md`.
+- 104 bag directory currently keeps only:
+  - `/home/user/bags/m20_shadow_20260609_144525`.
+- 104 free space after cleanup:
+  - `/home/user` on `overlayroot`: `6.5G` available, `65%` used.
