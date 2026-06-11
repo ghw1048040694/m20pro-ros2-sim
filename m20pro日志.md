@@ -5315,3 +5315,48 @@ axis command enabled
   - fast web pose check first;
   - web relocalization as the normal correction path;
   - 106 RViz `2D Pose Estimate` only as fallback if web relocalization or the web frontend is unavailable.
+
+## 2026-06-11 Web relocalization field failure diagnosis
+
+- User reported after field testing:
+  - the web page did not show the relocalization button;
+  - the web page could show robot position/heading, but heading looked reversed;
+  - 106 RViz fallback showed an `ODOM` error.
+- Root cause of the missing web button:
+  - local repo already had the `定位` tab and `执行重定位` button;
+  - 104 actual runtime copy was still an older deployed copy from `2026-06-10`;
+  - 104 port `8080` was not running at the first check.
+- Fix applied:
+  - synced updated `web_dashboard_node.py`, launch files, and `tcp_bridge_node.py` to `/home/user/m20pro_ros2_ws` on 104;
+  - rebuilt on 104 with Foxy;
+  - verified `http://10.21.31.104:8080/` served the new page containing:
+    - `data-tab="localize"`;
+    - `sendInitialPoseBtn`;
+    - `执行重定位`.
+- Web heading display:
+  - added `robot_pose_display_yaw_offset_rad`;
+  - real/web default is `pi`, only for the blue robot arrow and dashboard heading display;
+  - saved waypoint yaw, task yaw, and web relocalization yaw are not modified by this display offset.
+- 106 RViz `ODOM` error / invalid localization finding:
+  - during failure, 104 `/ODOM` contained invalid values such as `x=.inf`, `y=-.inf`;
+  - direct 103 TCP `1007/2` map pose query returned truncated JSON while localization was lost;
+  - 103 TCP `2002/1` reported `Location=1` at that time.
+- After a relocalization/reset attempt:
+  - 103 TCP `2002/1` returned `Location=0`;
+  - 103 TCP `1007/2` returned valid `PosX/PosY/PosZ/Yaw`;
+  - `m20pro_tcp_bridge` logged repeated vendor relocalization success messages for `2101/1`.
+- Robustness added:
+  - `tcp_bridge` now rejects `nan/inf` map poses and does not publish bad `/odom`, TF, or `/m20pro_tcp_bridge/map_pose`;
+  - `tcp_bridge` publishes `localization_ok=false` when map pose query fails or returns no valid pose;
+  - web dashboard ignores non-finite pose values instead of showing invalid robot state.
+- Real shadow verification:
+  - front-running 104 real shadow startup reached:
+
+```text
+M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
+```
+
+- No real/web processes were left running after this diagnosis.
+- Important field note:
+  - if 106 RViz or 104 web shows ODOM/pose errors, first check whether localization is valid (`Location=0`) and whether 103 `1007/2` returns a full valid pose;
+  - do not treat an `inf` ODOM state as a normal Nav2 problem.

@@ -32,7 +32,7 @@ def generate_launch_description():
         get_package_share_directory("nav2_bringup") if nav2_stack_available else ""
     )
 
-    default_params = os.path.join(bringup_share, "config", "m20pro.yaml")
+    default_params = os.path.join(bringup_share, "config", "m20pro_real.yaml")
     default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_real.yaml")
     default_floor_config = os.path.join(bringup_share, "config", "inspection_waypoints.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
@@ -65,6 +65,7 @@ def generate_launch_description():
     web_dashboard_port = LaunchConfiguration("web_dashboard_port")
     web_dashboard_data_dir = LaunchConfiguration("web_dashboard_data_dir")
     web_dashboard_map_archive_dir = LaunchConfiguration("web_dashboard_map_archive_dir")
+    robot_pose_display_yaw_offset_rad = LaunchConfiguration("robot_pose_display_yaw_offset_rad")
     initialpose_topic = LaunchConfiguration("initialpose_topic")
     relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
     factory_host = LaunchConfiguration("factory_host")
@@ -121,6 +122,7 @@ def generate_launch_description():
         DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
         DeclareLaunchArgument("web_dashboard_data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("web_dashboard_map_archive_dir", default_value="~/m20pro_maps"),
+        DeclareLaunchArgument("robot_pose_display_yaw_offset_rad", default_value="3.141592653589793"),
         DeclareLaunchArgument("initialpose_topic", default_value="/initialpose"),
         DeclareLaunchArgument(
             "relocalization_result_topic",
@@ -413,6 +415,10 @@ def generate_launch_description():
                     "port": web_dashboard_port,
                     "data_dir": web_dashboard_data_dir,
                     "map_archive_dir": web_dashboard_map_archive_dir,
+                    "robot_pose_display_yaw_offset_rad": ParameterValue(
+                        robot_pose_display_yaw_offset_rad,
+                        value_type=float,
+                    ),
                     "map_manifest": map_manifest,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,

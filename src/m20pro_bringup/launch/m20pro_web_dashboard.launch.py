@@ -15,6 +15,7 @@ def generate_launch_description():
     port = LaunchConfiguration("port")
     data_dir = LaunchConfiguration("data_dir")
     map_archive_dir = LaunchConfiguration("map_archive_dir")
+    robot_pose_display_yaw_offset_rad = LaunchConfiguration("robot_pose_display_yaw_offset_rad")
     map_manifest = LaunchConfiguration("map_manifest")
     factory_host = LaunchConfiguration("factory_host")
     factory_user = LaunchConfiguration("factory_user")
@@ -37,6 +38,7 @@ def generate_launch_description():
         DeclareLaunchArgument("port", default_value="8080"),
         DeclareLaunchArgument("data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("map_archive_dir", default_value="~/m20pro_maps"),
+        DeclareLaunchArgument("robot_pose_display_yaw_offset_rad", default_value="3.141592653589793"),
         DeclareLaunchArgument(
             "map_manifest",
             default_value=os.path.join(bringup_share, "config", "map_manifest.yaml"),
@@ -95,6 +97,10 @@ def generate_launch_description():
                     "port": port,
                     "data_dir": data_dir,
                     "map_archive_dir": map_archive_dir,
+                    "robot_pose_display_yaw_offset_rad": ParameterValue(
+                        robot_pose_display_yaw_offset_rad,
+                        value_type=float,
+                    ),
                     "map_manifest": map_manifest,
                     "factory_host": factory_host,
                     "factory_user": factory_user,

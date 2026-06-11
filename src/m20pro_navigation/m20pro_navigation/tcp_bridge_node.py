@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 
 import rclpy
@@ -59,6 +60,7 @@ class M20TcpBridge(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
         self.last_pose_warning_time = None
         self.last_status_warning_time = None
+        self.last_invalid_pose_warning_time = None
 
         self.pose_pub = self.create_publisher(PoseStamped, "~/map_pose", 10)
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
@@ -260,8 +262,10 @@ class M20TcpBridge(Node):
             items = patrol_items(self.client.request(1007, 2, {}, response_timeout=1.0))
         except Exception as exc:
             self._warn_throttled("pose", "map pose query failed: %s" % exc, 5.0)
+            self._publish_localization_ok(False)
             return
         if not items:
+            self._publish_localization_ok(False)
             return
         now = self.get_clock().now().to_msg()
         map_frame = str(self.get_parameter("map_frame").value)
@@ -272,6 +276,22 @@ class M20TcpBridge(Node):
         z = float(items.get("PosZ", 0.0))
         x, y, z = self._vendor_position_to_ros(x, y, z)
         yaw = float(items.get("Yaw", 0.0))
+        if not all(math.isfinite(value) for value in (x, y, z, yaw)):
+            self._warn_throttled(
+                "invalid_pose",
+                "ignored invalid vendor pose: PosX=%s PosY=%s PosZ=%s Yaw=%s"
+                % (
+                    items.get("PosX"),
+                    items.get("PosY"),
+                    items.get("PosZ"),
+                    items.get("Yaw"),
+                ),
+                5.0,
+            )
+            localization_ok = Bool()
+            localization_ok.data = False
+            self.loc_pub.publish(localization_ok)
+            return
         quat = yaw_to_quaternion(yaw)
 
         pose = PoseStamped()
@@ -311,8 +331,11 @@ class M20TcpBridge(Node):
             odom_to_base.transform.rotation = quat
             self.tf_broadcaster.sendTransform([map_to_odom, odom_to_base])
 
+        self._publish_localization_ok(int(items.get("Location", 1)) == 0)
+
+    def _publish_localization_ok(self, ok: bool) -> None:
         localization_ok = Bool()
-        localization_ok.data = int(items.get("Location", 1)) == 0
+        localization_ok.data = bool(ok)
         self.loc_pub.publish(localization_ok)
 
     def _publish_navigation_status(self) -> None:

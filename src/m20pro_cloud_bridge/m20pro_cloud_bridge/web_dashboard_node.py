@@ -1117,7 +1117,14 @@ INDEX_HTML = r"""<!doctype html>
       drawAnnotations();
       drawMarkDraft();
       drawLocalizeDraft();
-      if (latest && latest.pose) drawArrow(latest.pose);
+      if (latest && latest.pose) {
+        const robotPose = {
+          x: latest.pose.x,
+          y: latest.pose.y,
+          yaw: Number.isFinite(Number(latest.pose.display_yaw)) ? latest.pose.display_yaw : latest.pose.yaw
+        };
+        drawArrow(robotPose);
+      }
     }
     async function refreshLiveMap(version) {
       if (state.selectedMapId || version === state.liveMapVersion) return;
@@ -1155,7 +1162,10 @@ INDEX_HTML = r"""<!doctype html>
       $("floor").textContent = text(s.floor);
       $("stair").textContent = text(s.stair_status);
       $("gait").textContent = text(s.gait_command);
-      if (s.pose) $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / 朝向 ${fmtNumber(s.pose.yaw_deg, 0)}°`;
+      if (s.pose) {
+        const yawDeg = Number.isFinite(Number(s.pose.display_yaw_deg)) ? s.pose.display_yaw_deg : s.pose.yaw_deg;
+        $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / 朝向 ${fmtNumber(yawDeg, 0)}°`;
+      }
       else $("pose").textContent = "-";
       $("nav").textContent = JSON.stringify({
         路径点数: s.path ? s.path.points.length : 0,
@@ -1609,6 +1619,21 @@ def _pose_to_dict(pose: Pose) -> Dict[str, float]:
     }
 
 
+def _wrap_angle(angle: float) -> float:
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle <= -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+
+
+def _is_finite_pose_dict(pose: Dict[str, float]) -> bool:
+    return all(
+        math.isfinite(float(pose.get(key, 0.0)))
+        for key in ("x", "y", "z", "yaw", "yaw_deg")
+    )
+
+
 def _parse_json_text(text: str) -> Any:
     try:
         return json.loads(text)
@@ -1919,6 +1944,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
         self.declare_parameter("initialpose_publish_repeats", 5)
         self.declare_parameter("initialpose_publish_interval_s", 0.1)
+        self.declare_parameter("robot_pose_display_yaw_offset_rad", math.pi)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
@@ -2140,6 +2166,14 @@ class WebDashboardNode(Node):
     def _on_pose(self, msg: PoseStamped) -> None:
         with self._lock:
             pose = _pose_to_dict(msg.pose)
+            if not _is_finite_pose_dict(pose):
+                self._mark_topic("pose_invalid")
+                return
+            display_offset = float(self.get_parameter("robot_pose_display_yaw_offset_rad").value)
+            if math.isfinite(display_offset) and abs(display_offset) > 1e-12:
+                display_yaw = _wrap_angle(pose["yaw"] + display_offset)
+                pose["display_yaw"] = display_yaw
+                pose["display_yaw_deg"] = math.degrees(display_yaw)
             stamp = _stamp_to_float(msg.header.stamp)
             if stamp is not None:
                 pose["stamp"] = stamp
