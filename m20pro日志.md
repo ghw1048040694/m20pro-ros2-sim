@@ -5193,6 +5193,7 @@ waypoint.result_file_prefix
 - `inspection_waypoints.yaml` example task points were updated with Chinese labels plus `area`, `room`, and `result_file_prefix`.
 - `config_audit_node` now warns if a task waypoint has no label/name, area/region, or room/place.
 - Payload/负重 check:
+  - official feedback: M20Pro payload handling is adaptive, so there is no expected manual payload value to configure in our stack;
   - this repository has no runtime payload/负重 compensation setting;
   - URDF has static link masses only, not a real-robot load setting;
   - 104 currently exposes `/EXT_LOAD/POWER` and `/EXT_LOAD/CUR` services with type `drdds/srv/StdSrvInt32`;
