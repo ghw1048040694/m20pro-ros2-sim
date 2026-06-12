@@ -17,12 +17,17 @@ import rclpy
 import yaml
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped, Twist
-from nav_msgs.msg import OccupancyGrid, Path as RosPath
+from nav_msgs.msg import OccupancyGrid, Odometry, Path as RosPath
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
+
+try:
+    from lifecycle_msgs.srv import GetState
+except ImportError:  # pragma: no cover - ROS lifecycle package should exist on robot.
+    GetState = None
 
 try:
     from drdds.msg import BatteryData
@@ -222,7 +227,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-columns: repeat(7, minmax(0, 1fr));
       gap: 4px;
       padding: 8px;
       border-bottom: 1px solid var(--line);
@@ -453,6 +458,38 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--accent);
       white-space: nowrap;
     }
+    .preflight-summary {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px;
+      background: #fbfcfe;
+    }
+    .preflight-summary.ok {
+      border-color: #86efac;
+      background: #f0fdf4;
+    }
+    .preflight-summary.fail {
+      border-color: #fecaca;
+      background: #fef2f2;
+    }
+    .check-row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      border-top: 1px solid var(--line);
+      padding: 7px 0;
+      font-size: 12px;
+    }
+    .check-row:first-child {
+      border-top: 0;
+    }
+    .check-status {
+      font-weight: 700;
+    }
+    .check-status.ok { color: var(--good); }
+    .check-status.warn { color: var(--warn); }
+    .check-status.fail { color: var(--bad); }
     .checkline {
       display: grid;
       grid-template-columns: 22px minmax(0, 1fr);
@@ -519,6 +556,7 @@ INDEX_HTML = r"""<!doctype html>
         <button class="tab" data-tab="maps">地图</button>
         <button class="tab" data-tab="marks">标点</button>
         <button class="tab" data-tab="tasks">任务</button>
+        <button class="tab" data-tab="preflight">自检</button>
       </nav>
       <div class="content">
         <section id="tab-live" class="panel active">
@@ -784,7 +822,36 @@ INDEX_HTML = r"""<!doctype html>
           </div>
         </section>
 
+        <section id="tab-preflight" class="panel">
+          <div class="section">
+            <h2>作业前自检</h2>
+            <div id="preflightSummary" class="preflight-summary">尚未自检</div>
+            <div class="actions">
+              <button class="primary" id="runPreflightBtn">开始自检</button>
+              <button id="refreshPreflightBtn">刷新结果</button>
+            </div>
+            <div class="small" style="margin-top:8px;">
+              自检只读取当前系统状态，不重启原厂服务，不修改 multicast/FastDDS。看到“自检通过”后再开始任务。
+            </div>
+          </div>
+          <div class="section">
+            <h2>检查项</h2>
+            <div id="preflightItems" class="list"></div>
+          </div>
+          <div class="section">
+            <h2>原始结果</h2>
+            <div id="preflightRaw" class="mono">等待自检</div>
+          </div>
+        </section>
+
         <section id="tab-tasks" class="panel">
+          <div class="section">
+            <h2>作业前状态</h2>
+            <div id="taskPreflightSummary" class="preflight-summary">尚未自检</div>
+            <div class="actions">
+              <button id="taskRunPreflightBtn">先做自检</button>
+            </div>
+          </div>
           <div class="section">
             <h2>任务编排</h2>
             <div class="row">
@@ -830,6 +897,7 @@ INDEX_HTML = r"""<!doctype html>
       markDraft: null,
       localizeDraft: null,
       markPointer: null,
+      preflight: null,
       lastRelocalizationStamp: null
     };
     const manualPointTypeNames = {
@@ -878,6 +946,66 @@ INDEX_HTML = r"""<!doctype html>
     }
     function setLog(id, payload) {
       $(id).textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    }
+    function preflightStatusText(result) {
+      if (!result) return "尚未自检";
+      const ageText = result.age_sec === null || result.age_sec === undefined ? "" : ` / ${fmtAge(result.age_sec)}前`;
+      if (result.ok) return `自检通过${ageText}`;
+      return `自检未通过${ageText}`;
+    }
+    function renderPreflight(result) {
+      state.preflight = result || null;
+      const summaries = [$("preflightSummary"), $("taskPreflightSummary")];
+      for (const box of summaries) {
+        if (!box) continue;
+        box.className = "preflight-summary";
+        if (result) box.classList.add(result.ok ? "ok" : "fail");
+        box.textContent = preflightStatusText(result);
+      }
+      const itemsBox = $("preflightItems");
+      if (itemsBox) {
+        itemsBox.innerHTML = "";
+        const items = result && result.items ? result.items : [];
+        if (!items.length) {
+          itemsBox.innerHTML = `<div class="small">尚未自检。</div>`;
+        } else {
+          for (const item of items) {
+            const row = document.createElement("div");
+            row.className = "check-row";
+            const statusClass = item.status === "ok" ? "ok" : (item.status === "warn" ? "warn" : "fail");
+            const statusText = item.status === "ok" ? "通过" : (item.status === "warn" ? "提醒" : "失败");
+            row.innerHTML = `
+              <div class="check-status ${statusClass}">${statusText}</div>
+              <div><strong>${item.label || item.key}</strong><div class="small">${item.message || ""}</div></div>
+            `;
+            itemsBox.appendChild(row);
+          }
+        }
+      }
+      if ($("preflightRaw")) $("preflightRaw").textContent = result ? JSON.stringify(result, null, 2) : "等待自检";
+    }
+    async function loadPreflight() {
+      try {
+        const payload = await fetchJson("/api/preflight");
+        renderPreflight(payload.preflight || null);
+      } catch (err) {
+        renderPreflight(null);
+      }
+    }
+    async function runPreflight() {
+      const buttons = [$("runPreflightBtn"), $("taskRunPreflightBtn")].filter(Boolean);
+      for (const btn of buttons) btn.disabled = true;
+      if ($("preflightSummary")) $("preflightSummary").textContent = "自检中...";
+      if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "自检中...";
+      try {
+        const payload = await api("POST", "/api/preflight/run", {mode: "move"});
+        renderPreflight(payload.preflight || payload);
+        await loadTasks();
+      } catch (err) {
+        setLog("preflightRaw", err);
+      } finally {
+        for (const btn of buttons) btn.disabled = false;
+      }
     }
     function currentAnnotationMapId() {
       return state.selectedMapId || "live_map";
@@ -1347,15 +1475,17 @@ INDEX_HTML = r"""<!doctype html>
       for (const task of state.tasks) {
         const active = payload.active_task && payload.active_task.status === "running";
         const isRunning = task.status === "running";
-        const canStart = !active && !isRunning;
+        const preflightOk = Boolean(payload.preflight_ok);
+        const canStart = preflightOk && !active && !isRunning;
         const canDelete = !isRunning && !(payload.active_task && payload.active_task.task_id === task.id);
+        const startLabel = isRunning ? "执行中" : (!preflightOk ? "先做自检" : (active ? "先停止当前任务" : "开始执行"));
         const el = document.createElement("div");
         el.className = "item";
         el.innerHTML = `
           <div class="item-head"><span>${task.name || task.id}</span><span class="tag">${task.status || "ready"}</span></div>
           <div class="item-meta">${(task.annotation_ids || []).length} 个点 / ${task.created_at || ""}${task.updated_at ? ` / 更新 ${task.updated_at}` : ""}</div>
           <div class="actions">
-            <button class="primary" data-start-task="${task.id}" ${canStart ? "" : "disabled"}>${isRunning ? "执行中" : (active ? "先停止当前任务" : "开始执行")}</button>
+            <button class="primary" data-start-task="${task.id}" ${canStart ? "" : "disabled"}>${startLabel}</button>
             <button data-rename-task="${task.id}">改名</button>
             <button class="danger" data-delete-task="${task.id}" ${canDelete ? "" : "disabled"}>删除</button>
           </div>
@@ -1648,6 +1778,15 @@ INDEX_HTML = r"""<!doctype html>
       } catch (err) { setLog("activeTask", err); }
     });
     $("reloadTasksBtn").addEventListener("click", loadTasks);
+    $("runPreflightBtn").addEventListener("click", runPreflight);
+    $("refreshPreflightBtn").addEventListener("click", loadPreflight);
+    $("taskRunPreflightBtn").addEventListener("click", async () => {
+      document.querySelectorAll("button.tab").forEach(item => item.classList.remove("active"));
+      document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
+      document.querySelector('button.tab[data-tab="preflight"]').classList.add("active");
+      $("tab-preflight").classList.add("active");
+      await runPreflight();
+    });
     $("stopTaskBtn").addEventListener("click", async () => {
       try {
         const payload = await api("POST", "/api/tasks/stop", {});
@@ -1658,7 +1797,7 @@ INDEX_HTML = r"""<!doctype html>
     window.addEventListener("resize", resizeCanvas);
     resizeCanvas();
     syncManualDefaults(false);
-    loadMaps().then(loadAnnotations).then(loadTasks).catch(console.warn);
+    loadMaps().then(loadAnnotations).then(loadPreflight).then(loadTasks).catch(console.warn);
     mainLoop();
   </script>
 </body>
@@ -1717,6 +1856,14 @@ def _parse_json_text(text: str) -> Any:
 
 def _now_text() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+def fmt_age_text(age: Optional[float]) -> str:
+    if age is None:
+        return "无时间"
+    if age < 1.0:
+        return "<1s"
+    return f"{age:.0f}s前"
 
 
 def _new_id(prefix: str) -> str:
@@ -1933,6 +2080,8 @@ class WebDashboardNode(Node):
         self._normalize_runtime_state_on_startup()
         self._mapping_processes: Dict[str, Dict[str, Any]] = {}
         self._camera_workers: Dict[str, _CameraProxyWorker] = {}
+        self._last_preflight: Optional[Dict[str, Any]] = None
+        self._preflight_lock = threading.Lock()
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
@@ -2028,9 +2177,14 @@ class WebDashboardNode(Node):
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
+        self.declare_parameter("lidar_points_topic", "/LIDAR/POINTS")
+        self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("odom_topic", "/ODOM")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("map_topic", "/map")
+        self.declare_parameter("local_costmap_topic", "/local_costmap/costmap")
+        self.declare_parameter("global_costmap_topic", "/global_costmap/costmap")
         self.declare_parameter("dynamic_obstacle_topic", "/dynamic_obstacle_markers")
         self.declare_parameter("relocalization_result_topic", "/m20pro_tcp_bridge/relocalization_result")
         self.declare_parameter("detections_topic", "/m20pro_yolov8_inspection/detections")
@@ -2054,6 +2208,9 @@ class WebDashboardNode(Node):
         self.declare_parameter("camera_proxy_frame_timeout_s", 2.0)
         self.declare_parameter("max_path_points", 800)
         self.declare_parameter("max_events", 30)
+        self.declare_parameter("preflight_valid_s", 120.0)
+        self.declare_parameter("preflight_topic_timeout_s", 5.0)
+        self.declare_parameter("preflight_min_battery_level", 20)
 
     def _topic(self, name: str) -> str:
         return str(self.get_parameter(name).value)
@@ -2212,9 +2369,14 @@ class WebDashboardNode(Node):
             self.create_subscription(BatteryData, self._topic("battery_topic"), self._on_battery, 10)
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
+        self.create_subscription(PointCloud2, self._topic("lidar_points_topic"), self._on_lidar_points, 2)
+        self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, 5)
+        self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
         self.create_subscription(RosPath, self._topic("plan_topic"), self._on_path, 5)
         self.create_subscription(OccupancyGrid, self._topic("map_topic"), self._on_map, map_qos)
+        self.create_subscription(OccupancyGrid, self._topic("local_costmap_topic"), self._on_local_costmap, 2)
+        self.create_subscription(OccupancyGrid, self._topic("global_costmap_topic"), self._on_global_costmap, 2)
         self.create_subscription(MarkerArray, self._topic("dynamic_obstacle_topic"), self._on_markers, 10)
         self.create_subscription(
             String,
@@ -2316,6 +2478,49 @@ class WebDashboardNode(Node):
             self._state["battery"] = battery
             self._mark_topic("battery")
 
+    def _on_lidar_points(self, msg: PointCloud2) -> None:
+        stamp = _stamp_to_float(msg.header.stamp)
+        with self._lock:
+            self._state["lidar_points"] = {
+                "last_update": time.time(),
+                "stamp": stamp,
+                "frame_id": msg.header.frame_id,
+                "width": int(msg.width),
+                "height": int(msg.height),
+                "point_step": int(msg.point_step),
+                "row_step": int(msg.row_step),
+                "is_dense": bool(msg.is_dense),
+            }
+            self._mark_topic("lidar_points")
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        ranges_count = len(msg.ranges)
+        finite_count = sum(1 for value in msg.ranges if math.isfinite(float(value)))
+        with self._lock:
+            self._state["scan"] = {
+                "last_update": time.time(),
+                "stamp": _stamp_to_float(msg.header.stamp),
+                "frame_id": msg.header.frame_id,
+                "ranges": ranges_count,
+                "finite_ranges": finite_count,
+                "angle_min": float(msg.angle_min),
+                "angle_max": float(msg.angle_max),
+            }
+            self._mark_topic("scan")
+
+    def _on_odom(self, msg: Odometry) -> None:
+        pose = _pose_to_dict(msg.pose.pose)
+        with self._lock:
+            self._state["odom"] = {
+                "last_update": time.time(),
+                "stamp": _stamp_to_float(msg.header.stamp),
+                "frame_id": msg.header.frame_id,
+                "child_frame_id": msg.child_frame_id,
+                "pose": pose,
+                "finite": _is_finite_pose_dict(pose),
+            }
+            self._mark_topic("odom")
+
     def _on_pose(self, msg: PoseStamped) -> None:
         with self._lock:
             pose = _pose_to_dict(msg.pose)
@@ -2333,6 +2538,7 @@ class WebDashboardNode(Node):
             stamp = _stamp_to_float(msg.header.stamp)
             if stamp is not None:
                 pose["stamp"] = stamp
+            pose["last_update"] = time.time()
             self._state["pose"] = pose
             self._mark_topic("pose")
 
@@ -2364,6 +2570,7 @@ class WebDashboardNode(Node):
         map_payload = {
             "available": True,
             "version": int(time.time() * 1000),
+            "last_update": time.time(),
             "frame_id": msg.header.frame_id,
             "stamp": _stamp_to_float(msg.header.stamp),
             "width": int(info.width),
@@ -2376,6 +2583,32 @@ class WebDashboardNode(Node):
             self._state["map"] = map_payload
             self._state["map_version"] = map_payload["version"]
             self._mark_topic("map")
+
+    def _on_local_costmap(self, msg: OccupancyGrid) -> None:
+        info = msg.info
+        with self._lock:
+            self._state["local_costmap"] = {
+                "last_update": time.time(),
+                "stamp": _stamp_to_float(msg.header.stamp),
+                "frame_id": msg.header.frame_id,
+                "width": int(info.width),
+                "height": int(info.height),
+                "resolution": float(info.resolution),
+            }
+            self._mark_topic("local_costmap")
+
+    def _on_global_costmap(self, msg: OccupancyGrid) -> None:
+        info = msg.info
+        with self._lock:
+            self._state["global_costmap"] = {
+                "last_update": time.time(),
+                "stamp": _stamp_to_float(msg.header.stamp),
+                "frame_id": msg.header.frame_id,
+                "width": int(info.width),
+                "height": int(info.height),
+                "resolution": float(info.resolution),
+            }
+            self._mark_topic("global_costmap")
 
     def _on_markers(self, msg: MarkerArray) -> None:
         markers: List[Dict[str, Any]] = []
@@ -2448,6 +2681,9 @@ class WebDashboardNode(Node):
             snapshot["path"] = dict(self._state["path"])
             snapshot["dynamic_obstacles"] = list(self._state["dynamic_obstacles"])
             snapshot["events"] = list(self._state["events"])
+            for key in ("lidar_points", "scan", "odom", "local_costmap", "global_costmap"):
+                if key in self._state:
+                    snapshot[key] = dict(self._state[key])
             snapshot["topics"] = {
                 key: dict(value)
                 for key, value in self._state["topics"].items()
@@ -2456,6 +2692,8 @@ class WebDashboardNode(Node):
         with self._data_lock:
             snapshot["selected_map_id"] = self._settings.get("selected_map_id")
             snapshot["active_task"] = self._settings.get("active_task")
+        with self._preflight_lock:
+            snapshot["preflight"] = self._preflight_with_age_unlocked()
 
         snapshot["ok"] = True
         snapshot["node_time"] = now
@@ -2499,6 +2737,309 @@ class WebDashboardNode(Node):
                 "maps": self._all_maps_unlocked(),
                 "selected_map_id": self._settings.get("selected_map_id"),
             }
+
+    def _preflight_payload(self) -> Dict[str, Any]:
+        with self._preflight_lock:
+            return {"ok": True, "preflight": self._preflight_with_age_unlocked()}
+
+    def _preflight_with_age_unlocked(self) -> Optional[Dict[str, Any]]:
+        if not self._last_preflight:
+            return None
+        payload = dict(self._last_preflight)
+        timestamp = payload.get("timestamp")
+        if timestamp is not None:
+            payload["age_sec"] = max(0.0, time.time() - float(timestamp))
+            valid_s = max(1.0, float(self.get_parameter("preflight_valid_s").value))
+            payload["valid"] = bool(payload.get("ok")) and payload["age_sec"] <= valid_s
+            payload["valid_s"] = valid_s
+        return payload
+
+    def _preflight_is_valid(self) -> bool:
+        with self._preflight_lock:
+            result = self._preflight_with_age_unlocked()
+        return bool(result and result.get("valid"))
+
+    def _run_preflight(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        mode = str(payload.get("mode") or "move").strip()
+        if mode not in ("move", "shadow"):
+            mode = "move"
+        now = time.time()
+        timeout_s = max(1.0, float(self.get_parameter("preflight_topic_timeout_s").value))
+        items: List[Dict[str, Any]] = []
+
+        def add(key: str, label: str, status: str, message: str = "") -> None:
+            items.append({"key": key, "label": label, "status": status, "message": message})
+
+        node_names = set(self.get_node_names())
+        required_nodes = [
+            "m20pro_tcp_bridge",
+            "m20pro_pointcloud_fusion",
+            "m20pro_web_dashboard",
+            "map_server",
+            "controller_server",
+            "planner_server",
+            "bt_navigator",
+            "m20pro_floor_manager",
+        ]
+        missing_nodes = [name for name in required_nodes if name not in node_names]
+        add(
+            "nodes",
+            "核心节点",
+            "ok" if not missing_nodes else "fail",
+            "全部在线" if not missing_nodes else "缺少：" + "、".join(f"/{name}" for name in missing_nodes),
+        )
+
+        topic_names = {name for name, _types in self.get_topic_names_and_types()}
+        required_topics = [
+            self._topic("lidar_points_topic"),
+            self._topic("scan_topic"),
+            self._topic("odom_topic"),
+            self._topic("pose_topic"),
+            self._topic("localization_ok_topic"),
+            self._topic("navigation_status_topic"),
+            self._topic("map_topic"),
+            self._topic("local_costmap_topic"),
+            self._topic("global_costmap_topic"),
+        ]
+        missing_topics = [topic for topic in required_topics if topic not in topic_names]
+        add(
+            "topics",
+            "关键话题",
+            "ok" if not missing_topics else "fail",
+            "全部存在" if not missing_topics else "缺少：" + "、".join(missing_topics),
+        )
+
+        with self._lock:
+            current_state = {
+                key: self._state.get(key)
+                for key in (
+                    "lidar_points",
+                    "scan",
+                    "odom",
+                    "pose",
+                    "battery",
+                    "localization_ok",
+                    "navigation_status",
+                    "map",
+                    "local_costmap",
+                    "global_costmap",
+                )
+            }
+
+        def fresh(key: str) -> Tuple[bool, Optional[float], Any]:
+            value = current_state.get(key)
+            if not isinstance(value, dict):
+                return False, None, value
+            last_update = value.get("last_update")
+            if last_update is None:
+                return False, None, value
+            age = max(0.0, now - float(last_update))
+            return age <= timeout_s, age, value
+
+        lidar_ok, lidar_age, lidar = fresh("lidar_points")
+        lidar_points = 0
+        if isinstance(lidar, dict):
+            lidar_points = int(lidar.get("width", 0)) * max(1, int(lidar.get("height", 1)))
+        add(
+            "lidar_points",
+            "原始点云",
+            "ok" if lidar_ok and lidar_points > 0 else "fail",
+            f"{lidar_points} 点 / {fmt_age_text(lidar_age)}" if lidar_age is not None else "未收到 /LIDAR/POINTS",
+        )
+
+        scan_ok, scan_age, scan = fresh("scan")
+        finite_ranges = int(scan.get("finite_ranges", 0)) if isinstance(scan, dict) else 0
+        add(
+            "scan",
+            "二维激光",
+            "ok" if scan_ok and finite_ranges > 0 else "fail",
+            f"有效距离 {finite_ranges} / {fmt_age_text(scan_age)}" if scan_age is not None else "未收到 /scan",
+        )
+
+        odom_ok, odom_age, odom = fresh("odom")
+        odom_finite = bool(isinstance(odom, dict) and odom.get("finite"))
+        add(
+            "odom",
+            "原厂里程计",
+            "ok" if odom_ok and odom_finite else "fail",
+            f"位姿有效 / {fmt_age_text(odom_age)}" if odom_age is not None and odom_finite else "未收到有效 /ODOM",
+        )
+
+        pose = current_state.get("pose")
+        pose_has_stamp = isinstance(pose, dict) and _is_finite_pose_dict(pose)
+        pose_age = None
+        if isinstance(pose, dict) and pose.get("stamp"):
+            pose_age = max(0.0, now - float(pose["stamp"]))
+        add(
+            "map_pose",
+            "地图位姿",
+            "ok" if pose_has_stamp else "fail",
+            (
+                f"x={float(pose.get('x', 0.0)):.2f} y={float(pose.get('y', 0.0)):.2f}"
+                if pose_has_stamp
+                else "未收到有效 /m20pro_tcp_bridge/map_pose"
+            ),
+        )
+
+        loc_ok = current_state.get("localization_ok") is True
+        add(
+            "localization",
+            "定位状态",
+            "ok" if loc_ok else "fail",
+            "localization_ok=true" if loc_ok else "定位未确认，请先重定位",
+        )
+
+        nav_status = current_state.get("navigation_status")
+        add(
+            "navigation_status",
+            "原厂导航状态",
+            "ok" if nav_status else "warn",
+            str(nav_status or "暂未收到 navigation_status"),
+        )
+
+        map_ok = isinstance(current_state.get("map"), dict)
+        add("map", "地图", "ok" if map_ok else "fail", "已加载 /map" if map_ok else "未收到 /map")
+
+        local_ok, local_age, local_costmap = fresh("local_costmap")
+        local_size_ok = bool(isinstance(local_costmap, dict) and local_costmap.get("width") and local_costmap.get("height"))
+        add(
+            "local_costmap",
+            "局部代价地图",
+            "ok" if local_ok and local_size_ok else "fail",
+            f"{local_costmap.get('width')}x{local_costmap.get('height')} / {fmt_age_text(local_age)}" if isinstance(local_costmap, dict) else "未收到 local_costmap",
+        )
+
+        global_ok, global_age, global_costmap = fresh("global_costmap")
+        global_size_ok = bool(isinstance(global_costmap, dict) and global_costmap.get("width") and global_costmap.get("height"))
+        add(
+            "global_costmap",
+            "全局代价地图",
+            "ok" if global_ok and global_size_ok else "fail",
+            f"{global_costmap.get('width')}x{global_costmap.get('height')} / {fmt_age_text(global_age)}" if isinstance(global_costmap, dict) else "未收到 global_costmap",
+        )
+
+        battery = current_state.get("battery")
+        primary = battery.get("primary") if isinstance(battery, dict) else None
+        battery_level = int(primary.get("level", 0)) if isinstance(primary, dict) else 0
+        min_level = int(self.get_parameter("preflight_min_battery_level").value)
+        add(
+            "battery",
+            "电量",
+            "ok" if isinstance(primary, dict) and battery_level >= min_level else "fail",
+            f"{battery_level}% / 最低要求 {min_level}%" if isinstance(primary, dict) else "未收到电池数据",
+        )
+
+        lifecycle_results = self._check_lifecycle_nodes(
+            ["/map_server", "/controller_server", "/planner_server", "/bt_navigator"]
+        )
+        for node_name, lifecycle in lifecycle_results.items():
+            add(
+                f"lifecycle:{node_name}",
+                f"{node_name} 生命周期",
+                "ok" if lifecycle.get("active") else "fail",
+                lifecycle.get("message", ""),
+            )
+
+        motion = self._detect_motion_mode()
+        if mode == "move":
+            motion_ok = motion.get("mode") == "move"
+            add(
+                "motion_mode",
+                "运动模式",
+                "ok" if motion_ok else "fail",
+                motion.get("message") or "未确认 move 模式，请用 104_start_real_move.sh 全量启动",
+            )
+        else:
+            add(
+                "motion_mode",
+                "运动模式",
+                "ok" if motion.get("mode") in ("shadow", "move") else "warn",
+                motion.get("message") or "未确认运动模式",
+            )
+
+        failures = [item for item in items if item["status"] == "fail"]
+        warnings = [item for item in items if item["status"] == "warn"]
+        result = {
+            "ok": not failures,
+            "valid": not failures,
+            "mode": mode,
+            "timestamp": now,
+            "time_text": _now_text(),
+            "age_sec": 0.0,
+            "valid_s": max(1.0, float(self.get_parameter("preflight_valid_s").value)),
+            "items": items,
+            "failures": len(failures),
+            "warnings": len(warnings),
+            "summary": "自检通过" if not failures else f"自检未通过：{len(failures)} 项失败",
+        }
+        with self._preflight_lock:
+            self._last_preflight = result
+        self._append_event("作业前自检", {"ok": result["ok"], "failures": result["failures"]})
+        return {"ok": True, "preflight": result, "message": result["summary"]}
+
+    def _check_lifecycle_nodes(self, node_names: List[str]) -> Dict[str, Dict[str, Any]]:
+        results: Dict[str, Dict[str, Any]] = {}
+        if GetState is None:
+            return {
+                node_name: {"active": False, "message": "lifecycle_msgs 不可用"}
+                for node_name in node_names
+            }
+        for node_name in node_names:
+            service_name = f"{node_name}/get_state"
+            result = {"active": False, "message": "未查询"}
+            try:
+                client = self.create_client(GetState, service_name)
+                if not client.wait_for_service(timeout_sec=0.25):
+                    result["message"] = f"{service_name} 不可用"
+                    results[node_name] = result
+                    self.destroy_client(client)
+                    continue
+                future = client.call_async(GetState.Request())
+                deadline = time.monotonic() + 0.75
+                while rclpy.ok() and not future.done() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                if future.done() and future.result() is not None:
+                    state = future.result().current_state
+                    label = str(state.label)
+                    result["active"] = label == "active"
+                    result["message"] = label or f"id={state.id}"
+                else:
+                    result["message"] = "查询超时"
+            except Exception as exc:
+                result["message"] = str(exc)
+            finally:
+                try:
+                    self.destroy_client(client)
+                except Exception:
+                    pass
+            results[node_name] = result
+        return results
+
+    def _detect_motion_mode(self) -> Dict[str, str]:
+        try:
+            output = subprocess.run(
+                ["ps", "-eo", "args"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+                check=False,
+            ).stdout
+        except Exception as exc:
+            return {"mode": "unknown", "message": f"无法读取进程列表：{exc}"}
+        launch_lines = [
+            line
+            for line in output.splitlines()
+            if "m20pro_bringup" in line and ("m20pro.launch.py" in line or "m20pro_real_full.sh" in line)
+        ]
+        joined = "\n".join(launch_lines)
+        if "enable_axis_command:=true" in joined or "m20pro_real_full.sh move" in joined:
+            return {"mode": "move", "message": "已确认 move：运动控制已放开"}
+        if "enable_axis_command:=false" in joined or "m20pro_real_full.sh shadow" in joined:
+            return {"mode": "shadow", "message": "当前是 shadow：不会下发运动控制"}
+        if launch_lines:
+            return {"mode": "unknown", "message": "找到 real launch，但未确认 enable_axis_command"}
+        return {"mode": "unknown", "message": "未找到全量 real 启动进程"}
 
     def _select_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip() or None
@@ -2928,7 +3469,17 @@ class WebDashboardNode(Node):
 
     def _tasks_payload(self) -> Dict[str, Any]:
         with self._data_lock:
-            return {"ok": True, "tasks": list(self._tasks), "active_task": self._settings.get("active_task")}
+            tasks = list(self._tasks)
+            active_task = self._settings.get("active_task")
+        with self._preflight_lock:
+            preflight = self._preflight_with_age_unlocked()
+        return {
+            "ok": True,
+            "tasks": tasks,
+            "active_task": active_task,
+            "preflight": preflight,
+            "preflight_ok": bool(preflight and preflight.get("valid")),
+        }
 
     def _update_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or payload.get("id") or "").strip()
@@ -3001,6 +3552,8 @@ class WebDashboardNode(Node):
 
     def _start_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or "").strip()
+        if not self._preflight_is_valid():
+            return self._error("作业前自检未通过或已过期，请先在前端执行自检")
         with self._data_lock:
             current_active = self._settings.get("active_task") or {}
             if current_active.get("status") == "running":
@@ -3637,6 +4190,8 @@ class WebDashboardNode(Node):
                     self._send_json(node._annotations_payload(query))
                 elif parsed.path == "/api/tasks":
                     self._send_json(node._tasks_payload())
+                elif parsed.path == "/api/preflight":
+                    self._send_json(node._preflight_payload())
                 elif parsed.path in ("/camera/front.mjpg", "/camera/rear.mjpg"):
                     camera_name = "front" if parsed.path == "/camera/front.mjpg" else "rear"
                     node._serve_mjpeg(camera_name, self)
@@ -3674,6 +4229,8 @@ class WebDashboardNode(Node):
                     self._send_api(node._start_task(payload))
                 elif parsed.path == "/api/tasks/stop":
                     self._send_api(node._stop_task(payload))
+                elif parsed.path == "/api/preflight/run":
+                    self._send_api(node._run_preflight(payload))
                 elif parsed.path == "/api/localization/initialpose":
                     self._send_api(node._publish_initialpose(payload))
                 else:

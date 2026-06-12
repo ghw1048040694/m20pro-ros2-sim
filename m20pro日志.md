@@ -52,6 +52,43 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - `/api/state` reports live battery data from two packs;
   - stopped the preview afterward and confirmed no web/real process remained.
 
+## 2026-06-12 web preflight integration
+
+- Integrated the 104 preflight workflow into the web dashboard.
+- Added a new `自检` tab:
+  - button: `开始自检`;
+  - displays each check item as pass/warn/fail;
+  - shows raw JSON for debugging.
+- Added API:
+  - `GET /api/preflight` returns the latest result;
+  - `POST /api/preflight/run` runs the checks and always returns HTTP 200 with full details, even when the preflight itself fails.
+- Added task safety gate:
+  - `/api/tasks` now reports `preflight_ok`;
+  - task start buttons are disabled unless the latest preflight is valid;
+  - `/api/tasks/start` also rejects direct API calls when preflight failed or expired.
+- Checks currently include:
+  - core nodes;
+  - key topics;
+  - `/LIDAR/POINTS` freshness and point count;
+  - `/scan` freshness and valid range count;
+  - `/ODOM` finite pose;
+  - `/m20pro_tcp_bridge/map_pose` finite pose;
+  - `localization_ok`;
+  - navigation status;
+  - `/map`;
+  - local/global costmap;
+  - battery level;
+  - Nav2 lifecycle states;
+  - confirmed `move` motion mode.
+- The web node now lightly subscribes to `/LIDAR/POINTS`, `/scan`, `/ODOM`, `/local_costmap/costmap`, and `/global_costmap/costmap` for metadata only; it does not forward or render heavy raw arrays.
+- Verified on 104 in standalone web preview:
+  - page starts normally;
+  - `/api/preflight` returns null before first run;
+  - `/api/preflight/run` returns a full failed checklist in preview mode, as expected because full real is not running;
+  - battery is still read correctly;
+  - `/api/tasks/start` is rejected while preflight is failed;
+  - preview was stopped and no web/real process remained.
+
 ## 2026-06-04 desktop field script regenerated
 
 - User asked to delete the previous M20Pro Word documents from the desktop and regenerate a clean script document named `脚本.word`.
