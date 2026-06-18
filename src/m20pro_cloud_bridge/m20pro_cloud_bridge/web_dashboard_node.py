@@ -702,6 +702,7 @@ INDEX_HTML = r"""<!doctype html>
               <span>显示实时激光轮廓</span>
             </label>
             <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
+            <div class="small" style="margin-top:8px;">重定位不要求导航已就绪；只要固定地图和 /scan/点云可用，就可以先在工位或测试场地执行重定位。</div>
             <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，红色激光轮廓贴合地图后再执行重定位。</div>
           </div>
         </section>
@@ -775,7 +776,7 @@ INDEX_HTML = r"""<!doctype html>
               <button id="reloadMapsBtn">刷新列表</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              不选择固定地图时页面显示实时 `/map`；选择项目内置地图或从 106 拉取的地图后，可直接在这张图上标点。
+              页面默认使用项目默认楼层固定地图；切换下拉框会立即显示对应 2D 栅格图，实时 `/map` 只作为临时调试视图。
             </div>
           </div>
           <div class="section">
@@ -1036,6 +1037,7 @@ INDEX_HTML = r"""<!doctype html>
       if (!result) return "尚未自检";
       const ageText = result.age_sec === null || result.age_sec === undefined ? "" : ` / ${fmtAge(result.age_sec)}前`;
       if (result.summary) return `${result.summary}${ageText}`;
+      if (result.ok && result.navigation_ready === false) return `最近一次基础自检通过；导航待重定位${ageText}`;
       if (result.ok) return `最近一次基础自检通过${ageText}`;
       return `最近一次基础自检未通过${ageText}`;
     }
@@ -1046,7 +1048,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!box) continue;
         box.className = "preflight-summary";
         if (result) {
-          const cls = result.ok ? (result.navigation_ready === false ? "warn" : "ok") : "fail";
+          const cls = result.ok ? "ok" : "fail";
           box.classList.add(cls);
         }
         box.textContent = preflightStatusText(result);
@@ -1087,7 +1089,7 @@ INDEX_HTML = r"""<!doctype html>
       if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       try {
-        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "workstation"}, 30000);
+        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "workstation"}, 45000);
         renderPreflight(payload.preflight || payload);
         await loadTasks();
       } catch (err) {
@@ -1160,12 +1162,26 @@ INDEX_HTML = r"""<!doctype html>
         return payload;
       } catch (err) {
         if (err && err.name === "AbortError") {
-          throw {ok: false, message: `请求超时：${Math.round(timeoutMs / 1000)} 秒内未收到返回；工位未重定位时请刷新结果或查看服务状态`};
+          throw {ok: false, message: `请求超时：${Math.round(timeoutMs / 1000)} 秒内未收到网页返回；请刷新自检结果或检查 m20pro-real.service`};
         }
         throw err;
       } finally {
         clearTimeout(timer);
       }
+    }
+    function mapPreferredByFloor(floor) {
+      if (!state.maps.length) return "";
+      const normalized = String(floor || "").trim();
+      if (normalized) {
+        const byId = state.maps.find(item => item.id === `builtin_${normalized}`);
+        if (byId) return byId.id;
+        const byFloor = state.maps.find(item => item.floor === normalized);
+        if (byFloor) return byFloor.id;
+      }
+      const f20 = state.maps.find(item => item.id === "builtin_F20") || state.maps.find(item => item.floor === "F20");
+      if (f20) return f20.id;
+      const builtin = state.maps.find(item => item.source === "project_builtin");
+      return builtin ? builtin.id : state.maps[0].id;
     }
     function resizeCanvas() {
       const before = getView();
@@ -1836,14 +1852,30 @@ INDEX_HTML = r"""<!doctype html>
       if (!mapId) {
         state.selectedMapId = null;
         state.fileMapVersion = -1;
+        state.map = null;
+        state.mapImage = null;
+        state.mapViewMode = "2d";
+        $("mapTitle").textContent = "实时地图";
+        $("mapMeta").textContent = "等待 /map 数据";
+        state.mapModeLabel = "实时 /map";
+        updateMapModeUi();
         return;
       }
       const map = await fetchJson(`/api/map_file?map_id=${encodeURIComponent(mapId)}`);
-      if (!map.available) return;
+      if (!map.available) {
+        const message = map.message || `地图 ${mapId} 不可用`;
+        $("mapTitle").textContent = "固定地图加载失败";
+        $("mapMeta").textContent = message;
+        $("cursor").textContent = message;
+        throw {ok: false, message};
+      }
       state.map = map;
       state.mapImage = buildMapImage(map);
       state.selectedMapId = mapId;
       state.fileMapVersion = map.version;
+      state.mapViewMode = "2d";
+      const select = $("mapSelect");
+      if (select && select.value !== mapId) select.value = mapId;
       $("mapTitle").textContent = map.name || `固定地图 ${mapId}`;
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
       state.mapModeLabel = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
@@ -1933,7 +1965,9 @@ INDEX_HTML = r"""<!doctype html>
     async function loadMaps() {
       const payload = await fetchJson("/api/maps");
       state.maps = payload.maps || [];
-      const selected = payload.selected_map_id || "";
+      const selected = payload.selected_map_id || mapPreferredByFloor(
+        (state.latest && state.latest.floor) || $("locFloor").value || "F20"
+      );
       const select = $("mapSelect");
       select.innerHTML = "";
       const live = document.createElement("option");
@@ -1948,7 +1982,16 @@ INDEX_HTML = r"""<!doctype html>
         select.appendChild(opt);
       }
       select.value = selected;
-      if (selected && selected !== state.selectedMapId) await loadFileMap(selected);
+      if (selected && selected !== state.selectedMapId) {
+        try {
+          await api("POST", "/api/maps/select", {map_id: selected});
+        } catch (err) {
+          console.warn(err);
+        }
+        await loadFileMap(selected);
+      } else if (!selected && state.selectedMapId) {
+        await loadFileMap("");
+      }
       renderMapList();
     }
     function renderMapList() {
@@ -2303,13 +2346,14 @@ INDEX_HTML = r"""<!doctype html>
     });
     $("sendInitialPoseBtn").addEventListener("click", async () => {
       try {
+        if (!state.map) throw {message: "还没有固定地图，请先在地图页选择 F20 或等待默认地图加载"};
         const [xText, yText] = $("locXY").value.split(",");
         const x = Number(xText);
         const y = Number(yText);
         const yaw = Number($("locYaw").value);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw {message: "定位坐标无效，请先在地图上拖箭头"};
         state.relocalizationApiLogUntil = Date.now() + 20000;
-        setLog("localizeLog", "已发送重定位请求，正在等待原厂回执和导航链路恢复...");
+        setLog("localizeLog", "正在发布 /initialpose；基础自检或导航未就绪不会阻止本次重定位...");
         const payload = await api("POST", "/api/localization/initialpose", {
           x,
           y,
@@ -2370,18 +2414,33 @@ INDEX_HTML = r"""<!doctype html>
         await loadMaps();
       } catch (err) { setLog("mappingLog", err); }
     });
+    async function applySelectedMap() {
+      const mapId = $("mapSelect").value;
+      await api("POST", "/api/maps/select", {map_id: mapId});
+      if (mapId) await loadFileMap(mapId);
+      else {
+        await loadFileMap("");
+        state.liveMapVersion = -1;
+        await loadTerrain();
+      }
+      await loadAnnotations();
+      draw();
+    }
     $("selectMapBtn").addEventListener("click", async () => {
       try {
-        const mapId = $("mapSelect").value;
-        await api("POST", "/api/maps/select", {map_id: mapId});
-        if (mapId) await loadFileMap(mapId);
-        else {
-          state.selectedMapId = null;
-          state.liveMapVersion = -1;
-          await loadTerrain();
-        }
-        await loadAnnotations();
-      } catch (err) { console.warn(err); }
+        await applySelectedMap();
+      } catch (err) {
+        console.warn(err);
+        $("cursor").textContent = err.message || JSON.stringify(err);
+      }
+    });
+    $("mapSelect").addEventListener("change", async () => {
+      try {
+        await applySelectedMap();
+      } catch (err) {
+        console.warn(err);
+        $("cursor").textContent = err.message || JSON.stringify(err);
+      }
     });
     $("reloadMapsBtn").addEventListener("click", loadMaps);
     $("markType").addEventListener("change", () => {
@@ -2774,6 +2833,8 @@ class WebDashboardNode(Node):
 
         self._projects = self._load_json("projects.json", [])
         self._maps = self._load_json("maps.json", [])
+        self._default_builtin_floor: Optional[str] = None
+        self._default_builtin_map_id: Optional[str] = None
         self._builtin_maps = self._load_builtin_maps()
         self._annotations = self._load_json("annotations.json", [])
         self._tasks = self._load_json("tasks.json", [])
@@ -3001,6 +3062,7 @@ class WebDashboardNode(Node):
 
         map_set = manifest.get("map_set") or {}
         source_note = str(map_set.get("source_note") or "").strip()
+        self._default_builtin_floor = str(map_set.get("default_floor") or "").strip() or None
         maps: List[Dict[str, Any]] = []
         floors = manifest.get("floors") or {}
         if not isinstance(floors, dict):
@@ -3041,6 +3103,11 @@ class WebDashboardNode(Node):
                 }
             )
         maps.sort(key=lambda item: (int(item.get("level") or 0), str(item.get("floor") or "")))
+        if self._default_builtin_floor:
+            for item in maps:
+                if item.get("floor") == self._default_builtin_floor:
+                    self._default_builtin_map_id = str(item.get("id") or "") or None
+                    break
         return maps
 
     def _builtin_map_derived(
@@ -3108,9 +3175,33 @@ class WebDashboardNode(Node):
             return record
         return self._find_by_id(self._builtin_maps, map_id)
 
+    def _default_map_id_unlocked(self) -> Optional[str]:
+        if self._default_builtin_map_id and self._find_map_record_unlocked(self._default_builtin_map_id):
+            return self._default_builtin_map_id
+        for item in self._builtin_maps:
+            if item.get("id") == "builtin_F20" or item.get("floor") == "F20":
+                return str(item.get("id") or "") or None
+        for item in self._builtin_maps:
+            if item.get("id"):
+                return str(item.get("id"))
+        for item in self._maps:
+            if item.get("id"):
+                return str(item.get("id"))
+        return None
+
     def _normalize_runtime_state_on_startup(self) -> None:
         active = self._settings.get("active_task") or {}
         changed = False
+        selected_map_id = self._settings.get("selected_map_id")
+        if selected_map_id and not self._find_map_record_unlocked(str(selected_map_id)):
+            self.get_logger().warning(f"selected map {selected_map_id} no longer exists; falling back to default map")
+            self._settings["selected_map_id"] = None
+            changed = True
+        if not self._settings.get("selected_map_id"):
+            default_map_id = self._default_map_id_unlocked()
+            if default_map_id:
+                self._settings["selected_map_id"] = default_map_id
+                changed = True
         for item in self._annotations:
             before = json.dumps(item, ensure_ascii=False, sort_keys=True)
             self._normalize_annotation_semantics(item)
@@ -5015,7 +5106,7 @@ class WebDashboardNode(Node):
             {"x": x, "y": y, "z": z, "yaw": yaw},
         )
         result = {
-            "ok": bool(verification.get("request_accepted")),
+            "ok": True,
             "navigation_ready": bool(verification.get("navigation_ready")),
             "message": verification.get("message", "已发布网页重定位请求"),
             "topic": str(self.get_parameter("initialpose_topic").value),
@@ -5137,7 +5228,7 @@ class WebDashboardNode(Node):
         elif vendor_failed:
             message = "已发布 /initialpose，但未看到原厂定位更新；103 TCP 诊断失败不作为网页重定位成败依据"
         else:
-            message = "已发布 /initialpose，但未确认 106 原厂定位生效；请确认 106 能订阅 /initialpose、当前地图正确、激光轮廓与地图大致重合"
+            message = "已发布 /initialpose；暂未确认 106 原厂定位生效，请继续按地图和激光轮廓调整后重试"
         return {
             "request_accepted": bool(factory_pose_accepted),
             "initialpose_published": True,
