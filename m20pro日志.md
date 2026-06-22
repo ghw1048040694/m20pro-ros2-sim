@@ -6690,3 +6690,28 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - Note:
   - after deleting `install/`, rebuild locally before running local launch commands:
     `colcon build --symlink-install`.
+
+## 2026-06-22 sim-only repository split
+
+- This workspace is now the sim-only project:
+  - path: `/home/fabu/桌面/M20Pro/m20pro_sim_ros2_ws`;
+  - split commit: `53ce1c2 chore: split sim project`.
+- Scope kept here:
+  - local upper-computer simulation;
+  - `m20pro_sim.launch.py`, RViz, bundled map assets, `/cloud_nav`, `/scan`, Nav2, floor/task/frontend logic;
+  - simple scripts: `scripts/start_sim.sh`, `scripts/status_sim.sh`, `scripts/stop_sim.sh`.
+- Scope removed from here:
+  - 104/GOS field deployment scripts and systemd units;
+  - real launch/config/FastDDS relay guard/preflight policy scripts;
+  - TCP bridge, lidar relay, Nav2 startup gate, control GUI, and inspection package.
+- Sim frontend cleanup:
+  - `runtime_mode=sim` is explicit;
+  - preflight checks `m20pro_dual_lidar_simulator`, `/cloud_nav`, `/scan`, `/map`, and Nav2;
+  - battery and true move/shadow checks are informational/skipped in sim;
+  - web copy and local map import no longer present 103/104/106 as the normal sim workflow.
+- Validation at split time:
+  - `git diff --check`;
+  - Python compile for sim launch, web dashboard, navigation, and cloud bridge modules;
+  - shell syntax checks for sim scripts and tools;
+  - `colcon build --symlink-install`.
+- The sibling real project is `/home/fabu/桌面/M20Pro/m20pro_real_ros2_ws`.
