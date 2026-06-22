@@ -15,7 +15,7 @@ from .geometry import quaternion_to_yaw, yaw_to_quaternion
 class M20SimBridge(Node):
     """A tiny 2D kinematic simulator that mimics the TCP bridge topics.
 
-    It lets the planner and follower run on a laptop without the 103/106 hosts.
+    It lets the planner and follower run on a laptop without robot hosts.
     """
 
     def __init__(self):

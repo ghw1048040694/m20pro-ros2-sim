@@ -40,12 +40,6 @@ def generate_launch_description():
     robot_pose_display_yaw_offset_rad = LaunchConfiguration("robot_pose_display_yaw_offset_rad")
     initialpose_topic = LaunchConfiguration("initialpose_topic")
     relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
-    factory_host = LaunchConfiguration("factory_host")
-    factory_user = LaunchConfiguration("factory_user")
-    factory_active_map = LaunchConfiguration("factory_active_map")
-    factory_mapping_start_command = LaunchConfiguration("factory_mapping_start_command")
-    factory_mapping_finish_command = LaunchConfiguration("factory_mapping_finish_command")
-    factory_mapping_cancel_command = LaunchConfiguration("factory_mapping_cancel_command")
     enable_map_pcd_postprocess = LaunchConfiguration("enable_map_pcd_postprocess")
     pcd_terrain_cell_size = LaunchConfiguration("pcd_terrain_cell_size")
     stair_zones_topic = LaunchConfiguration("stair_zones_topic")
@@ -77,31 +71,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "relocalization_result_topic",
             default_value="/m20pro_tcp_bridge/relocalization_result",
-        ),
-        DeclareLaunchArgument("factory_host", default_value="10.21.31.106"),
-        DeclareLaunchArgument("factory_user", default_value="user"),
-        DeclareLaunchArgument("factory_active_map", default_value="/var/opt/robot/data/maps/active"),
-        DeclareLaunchArgument(
-            "factory_mapping_start_command",
-            default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"nohup sudo -n drmap mapping -s -n {map_name} > "
-                "/tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &\""
-            ),
-        ),
-        DeclareLaunchArgument(
-            "factory_mapping_finish_command",
-            default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"sudo -n drmap stop_mapping\""
-            ),
-        ),
-        DeclareLaunchArgument(
-            "factory_mapping_cancel_command",
-            default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"sudo -n drmap stop_mapping\""
-            ),
         ),
         DeclareLaunchArgument("enable_map_pcd_postprocess", default_value="true"),
         DeclareLaunchArgument("pcd_terrain_cell_size", default_value="0.25"),
@@ -296,18 +265,23 @@ def generate_launch_description():
             parameters=[
                 {
                     "port": web_dashboard_port,
+                    "runtime_mode": "sim",
                     "data_dir": web_dashboard_data_dir,
                     "map_archive_dir": web_dashboard_map_archive_dir,
                     "robot_pose_display_yaw_offset_rad": robot_pose_display_yaw_offset_rad,
                     "map_manifest": map_manifest,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,
-                    "factory_host": factory_host,
-                    "factory_user": factory_user,
-                    "factory_active_map": factory_active_map,
-                    "factory_mapping_start_command": factory_mapping_start_command,
-                    "factory_mapping_finish_command": factory_mapping_finish_command,
-                    "factory_mapping_cancel_command": factory_mapping_cancel_command,
+                    "battery_topic": "",
+                    "lidar_points_topic": "/cloud_nav",
+                    "lidar_points_relay_subscribe_topic": "",
+                    "odom_topic": "/odom",
+                    "factory_host": "localhost",
+                    "factory_user": "",
+                    "factory_active_map": "",
+                    "factory_mapping_start_command": "true",
+                    "factory_mapping_finish_command": "true",
+                    "factory_mapping_cancel_command": "true",
                     "enable_map_pcd_postprocess": ParameterValue(
                         enable_map_pcd_postprocess,
                         value_type=bool,

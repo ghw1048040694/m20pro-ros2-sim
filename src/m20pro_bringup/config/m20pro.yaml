@@ -1,6 +1,6 @@
 m20pro_tcp_bridge:
   ros__parameters:
-    robot_ip: "10.21.31.103"
+    robot_ip: "127.0.0.1"
     tcp_port: 30001
     poll_rate_hz: 5.0
     cmd_vel_rate_hz: 20.0
@@ -22,7 +22,7 @@ m20pro_tcp_bridge:
     max_abs_map_position_m: 10000.0
     publish_tf: true
     # Used by the sim_bridge executable, which is intentionally named
-    # m20pro_tcp_bridge in sim launch so the topic names match real launch.
+    # m20pro_tcp_bridge in sim launch so the web/task topic names stay stable.
     initial_x: -5.0 #原0.0
     initial_y: 0.0
     initial_yaw: 0.0
@@ -107,7 +107,7 @@ m20pro_dual_lidar_simulator:
     current_floor_topic: "/m20pro/current_floor"
     default_floor: "F20"
 
-    # The simulator now uses the real factory PCD map for local perception.
+    # The simulator uses the recorded PCD map for local perception.
     # Keep this PCD and the active PGM/YAML from the same map package when
     # running metric comparisons.
     pcd_map_path: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"

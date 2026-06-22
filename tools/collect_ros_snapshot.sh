@@ -4,6 +4,8 @@ set -u
 STAMP="$(date +%Y%m%d_%H%M%S)"
 HOST="$(hostname 2>/dev/null || echo unknown_host)"
 OUT="${1:-m20pro_ros_snapshot_${HOST}_${STAMP}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 mkdir -p "$OUT"/{system,ros,topics,nodes,params,tf,maps}
 
 run() {
@@ -65,9 +67,7 @@ run system/summary "date; hostname; uname -a; whoami; pwd; uptime"
 run system/env_ros "printenv | sort | grep -E '^(ROS|RMW|CYCLONE|FAST|DDS|AMENT|COLCON)_' || true"
 run system/network "ip addr; echo; ip route"
 run system/processes "ps -eo pid,ppid,stat,pcpu,pmem,cmd --sort=cmd"
-run system/robot_processes "ps -eo pid,ppid,stat,pcpu,pmem,cmd | grep -Ei 'ros|slam|map|nav|local|dr|deep|lidar|camera|dds|robot' | grep -v grep || true"
-run system/systemd_robot "systemctl --type=service --state=running 2>/dev/null | grep -Ei 'ros|slam|map|nav|local|dr|deep|lidar|camera|robot' || true"
-run system/multicast_relay "systemctl status multicast-relay --no-pager 2>/dev/null || true; echo; pgrep -af 'multicast[-_]relay' || true; echo; ip maddr show || true"
+run system/sim_processes "ps -eo pid,ppid,stat,pcpu,pmem,cmd | grep -Ei 'ros|map|nav|local|lidar|dds|rviz|m20pro' | grep -v grep || true"
 
 if ! command -v ros2 >/dev/null 2>&1; then
   echo "ros2 command not found. Source the robot ROS environment before running this script." > "$OUT/ros/ROS2_NOT_FOUND.txt"
@@ -95,25 +95,21 @@ fi
 
 for topic in \
   /cloud_nav \
-  /LIDAR/POINTS \
-  /IMU_YESENSE \
-  /DEPTH_IMAGE \
-  /STEER \
-  /REAL_STEER \
   /LIDAR/FRONT/POINTS \
   /LIDAR/REAR/POINTS \
   /scan \
   /map \
+  /plan \
+  /local_costmap/costmap \
+  /global_costmap/costmap \
+  /dynamic_obstacle_markers \
   /odom \
   /tf \
   /tf_static \
   /m20pro_tcp_bridge/map_pose \
   /m20pro_tcp_bridge/localization_ok \
   /m20pro_tcp_bridge/obstacle_active \
-  /m20pro_tcp_bridge/navigation_status \
-  /camera/image_raw \
-  /front_wide/image_raw \
-  /rear_wide/image_raw; do
+  /m20pro_tcp_bridge/navigation_status; do
   name="$(safe_name "$topic")"
   if topic_exists "$topic"; then
     run "topics/${name}_hz" "ros2 topic hz '$topic' --window 10"
@@ -154,12 +150,11 @@ fi
 run tf/tf_echo_map_base "ros2 run tf2_ros tf2_echo map base_link"
 run tf/tf_echo_odom_base "ros2 run tf2_ros tf2_echo odom base_link"
 
-if [ -d /var/opt/robot/data/maps ]; then
-  run maps/maps_root "ls -lah /var/opt/robot/data/maps; readlink -f /var/opt/robot/data/maps/active || true"
-  run maps/maps_find "find /var/opt/robot/data/maps -maxdepth 3 -type f -o -type l | sort"
-  if [ -f /var/opt/robot/data/maps/active/occ_grid.yaml ]; then
-    cp /var/opt/robot/data/maps/active/occ_grid.yaml "$OUT/maps/active_occ_grid.yaml" 2>/dev/null || true
-  fi
+if [ -d "${WS_DIR}/src/m20pro_bringup/maps" ]; then
+  run maps/project_maps "find '${WS_DIR}/src/m20pro_bringup/maps' -maxdepth 4 -type f -o -type l | sort"
+fi
+if [ -f "${WS_DIR}/src/m20pro_bringup/config/map_manifest.yaml" ]; then
+  cp "${WS_DIR}/src/m20pro_bringup/config/map_manifest.yaml" "$OUT/maps/map_manifest.yaml" 2>/dev/null || true
 fi
 
 run_long system/recent_logs "journalctl -n 300 --no-pager 2>/dev/null || true"

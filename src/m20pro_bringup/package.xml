@@ -10,14 +10,12 @@
 
   <exec_depend>m20pro_navigation</exec_depend>
   <exec_depend>m20pro_description</exec_depend>
-  <exec_depend>m20pro_inspection</exec_depend>
   <exec_depend>m20pro_cloud_bridge</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_dwb_controller</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_navfn_planner</exec_depend>
-  <exec_depend condition="$ROS_DISTRO == 'foxy'">nav2_recoveries</exec_depend>
   <exec_depend condition="$ROS_DISTRO != 'foxy'">nav2_behaviors</exec_depend>
   <exec_depend condition="$ROS_DISTRO != 'foxy'">nav2_regulated_pure_pursuit_controller</exec_depend>
   <exec_depend condition="$ROS_DISTRO != 'foxy'">nav2_rotation_shim_controller</exec_depend>

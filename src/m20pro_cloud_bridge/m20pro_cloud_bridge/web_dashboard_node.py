@@ -117,7 +117,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>M20Pro 现场操作台</title>
+  <title>M20Pro 仿真操作台</title>
   <style>
     :root {
       color-scheme: light;
@@ -578,8 +578,8 @@ INDEX_HTML = r"""<!doctype html>
 <body>
   <header>
     <div>
-      <h1>M20Pro 现场操作台</h1>
-      <div class="subhead">建图、拉图、选图、标点、任务与实时状态统一入口</div>
+      <h1>M20Pro 仿真操作台</h1>
+      <div class="subhead">本地仿真、地图、标点、任务与实时状态统一入口</div>
     </div>
     <span class="pill"><span id="statusDot" class="dot"></span><span id="statusText">连接中</span></span>
   </header>
@@ -638,11 +638,11 @@ INDEX_HTML = r"""<!doctype html>
               <div id="localization" class="value">-</div>
             </div>
             <div class="tile">
-              <div class="label">原厂导航</div>
+              <div class="label">导航状态</div>
               <div id="factoryNav" class="value">-</div>
             </div>
             <div class="tile">
-              <div class="label">机器狗电量</div>
+              <div class="label">电量/仿真</div>
               <div id="battery" class="value">-</div>
             </div>
           </div>
@@ -658,7 +658,7 @@ INDEX_HTML = r"""<!doctype html>
                 <img id="rearVideo" src="/camera/rear.mjpg" alt="后广角相机画面" />
               </div>
             </div>
-            <div class="small" style="margin-top:8px;">视频由 103 RTSP 转为网页可看的 MJPEG；如果画面未出现，优先检查 103:8554 是否可达。</div>
+            <div class="small" style="margin-top:8px;">仿真项目默认不启用视频；需要预览视频时可显式配置本地视频源。</div>
           </div>
           <div class="section">
             <h2>导航状态</h2>
@@ -702,7 +702,7 @@ INDEX_HTML = r"""<!doctype html>
               <span>显示实时激光轮廓</span>
             </label>
             <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
-            <div class="small" style="margin-top:8px;">重定位不要求导航已就绪；只要固定地图和 /scan/点云可用，就可以先在工位或测试场地执行重定位。</div>
+            <div class="small" style="margin-top:8px;">重定位不要求导航已就绪；只要固定地图和 /scan/点云可用，就可以在仿真中调整起始位姿。</div>
             <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，红色激光轮廓贴合地图后再执行重定位。</div>
           </div>
         </section>
@@ -738,27 +738,31 @@ INDEX_HTML = r"""<!doctype html>
               <input id="mappingMapName" placeholder="留空自动按楼层和时间生成" />
             </div>
             <div class="actions">
-              <button id="checkMappingEnvBtn">检查 106 环境</button>
+              <button id="checkMappingEnvBtn">检查本地环境</button>
               <button class="primary" id="createSessionBtn">建立建图任务</button>
-              <button id="startMappingBtn">启动 106 建图</button>
+              <button id="startMappingBtn">标记开始建图</button>
               <button id="finishMappingBtn">完成/保存建图</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              默认按《M20 Pro 软件使用手册》通过 106 的 drmap 建图；需要 104 能免密 SSH 到 106，且 sudo drmap 不要求交互输入密码。
+              仿真项目不连接真机建图服务；这里用于记录本地地图验证流程。
             </div>
           </div>
           <div class="section">
-            <h2>拉取 106 当前地图</h2>
+            <h2>导入本地地图</h2>
             <div class="row">
               <label>地图楼层</label>
               <input id="importFloor" value="F20" />
+            </div>
+            <div class="row">
+              <label>地图目录</label>
+              <input id="importSource" placeholder="包含 occ_grid.yaml/map.yaml 的本地目录" />
             </div>
             <div class="row">
               <label>地图名称</label>
               <input id="importName" placeholder="留空自动生成" />
             </div>
             <div class="actions">
-              <button class="primary" id="importMapBtn">从 106 拉到 104</button>
+              <button class="primary" id="importMapBtn">导入到本地归档</button>
             </div>
             <div id="mappingLog" class="mono" style="margin-top:8px;">等待操作</div>
           </div>
@@ -893,7 +897,7 @@ INDEX_HTML = r"""<!doctype html>
               <button id="refreshPreflightBtn">刷新结果</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              基础自检只确认全量系统、网页、原始点云、电量和原厂状态链路；定位和代价地图需要到测试场地重定位后再看，不会阻止手柄原厂遥控。
+              基础自检确认仿真节点、网页、/cloud_nav、/scan、地图和 Nav2 状态；电量和真机运动模式在仿真中只作为信息项。
             </div>
           </div>
           <div class="section">
@@ -1121,13 +1125,13 @@ INDEX_HTML = r"""<!doctype html>
         result = await loadPreflight();
         if (result && !result.running) return result;
       }
-      throw {ok: false, message: "后台自检仍在执行，请刷新自检结果或查看 m20pro-real.service 日志"};
+      throw {ok: false, message: "后台自检仍在执行，请刷新自检结果或查看仿真启动终端日志"};
     }
     async function runPreflight() {
       const buttons = [$("runPreflightBtn"), $("taskRunPreflightBtn")].filter(Boolean);
       for (const btn of buttons) btn.disabled = true;
-      if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
-      if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
+      if ($("preflightSummary")) $("preflightSummary").textContent = "仿真基础自检中...";
+      if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "仿真基础自检中...";
       try {
         const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "auto", wait: false}, 10000);
         const result = payload.preflight || payload;
@@ -1204,7 +1208,7 @@ INDEX_HTML = r"""<!doctype html>
         return payload;
       } catch (err) {
         if (err && err.name === "AbortError") {
-          throw {ok: false, message: `请求超时：${Math.round(timeoutMs / 1000)} 秒内未收到网页返回；请刷新自检结果或检查 m20pro-real.service`};
+          throw {ok: false, message: `请求超时：${Math.round(timeoutMs / 1000)} 秒内未收到网页返回；请刷新自检结果或检查仿真启动终端日志`};
         }
         throw err;
       } finally {
@@ -1981,7 +1985,7 @@ INDEX_HTML = r"""<!doctype html>
         当前任务: s.active_task || null,
         电量: s.battery && s.battery.primary ? s.battery.primary : null,
         定位状态: s.localization_ok,
-        原厂导航: s.navigation_status || null,
+        导航状态: s.navigation_status || null,
         更新时间: s.node_time_text
       }, null, 2);
       const det = s.detections && (s.detections.parsed || s.detections.raw);
@@ -2029,7 +2033,7 @@ INDEX_HTML = r"""<!doctype html>
       for (const map of state.maps) {
         const opt = document.createElement("option");
         opt.value = map.id;
-        const sourceText = map.source === "project_builtin" ? "项目内置" : "106归档";
+        const sourceText = map.source === "project_builtin" ? "项目内置" : "本地导入";
         opt.textContent = `${map.name || map.id} (${map.floor || "-"} / ${sourceText})`;
         select.appendChild(opt);
       }
@@ -2050,13 +2054,13 @@ INDEX_HTML = r"""<!doctype html>
       const box = $("mapList");
       box.innerHTML = "";
       if (!state.maps.length) {
-        box.innerHTML = `<div class="small">当前没有可选固定地图，可先使用实时 /map 或从 106 拉取地图。</div>`;
+        box.innerHTML = `<div class="small">当前没有可选固定地图，可先使用实时 /map 或导入本地地图。</div>`;
         return;
       }
       for (const map of state.maps) {
         const el = document.createElement("div");
         el.className = "item";
-        const sourceText = map.source === "project_builtin" ? "项目内置" : "106 归档";
+        const sourceText = map.source === "project_builtin" ? "项目内置" : "本地导入";
         const note = map.source_note ? `<br>${map.source_note}` : "";
         el.innerHTML = `
           <div class="item-head"><span>${map.name || map.id}</span><span class="tag">${map.floor || "-"}</span></div>
@@ -2459,6 +2463,7 @@ INDEX_HTML = r"""<!doctype html>
       try {
         const payload = await api("POST", "/api/mapping/import_active_map", {
           session_id: state.sessionId,
+          source: $("importSource").value.trim(),
           floor: $("importFloor").value.trim(),
           map_name: $("importName").value.trim()
         });
@@ -2974,29 +2979,18 @@ class WebDashboardNode(Node):
         self._server = self._start_http_server()
 
     def _declare_parameters(self) -> None:
+        self.declare_parameter("runtime_mode", "sim")
         self.declare_parameter("host", "0.0.0.0")
         self.declare_parameter("port", 8080)
         self.declare_parameter("data_dir", "~/.m20pro_web")
         self.declare_parameter("map_archive_dir", "~/m20pro_maps")
         self.declare_parameter("map_manifest", "")
-        self.declare_parameter("factory_host", "10.21.31.106")
-        self.declare_parameter("factory_user", "user")
-        self.declare_parameter("factory_active_map", "/var/opt/robot/data/maps/active")
-        self.declare_parameter(
-            "factory_mapping_start_command",
-            'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"nohup sudo -n drmap mapping -s -n {map_name} > /tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &"',
-        )
-        self.declare_parameter(
-            "factory_mapping_finish_command",
-            'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"sudo -n drmap stop_mapping"',
-        )
-        self.declare_parameter(
-            "factory_mapping_cancel_command",
-            'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"sudo -n drmap stop_mapping"',
-        )
+        self.declare_parameter("factory_host", "localhost")
+        self.declare_parameter("factory_user", "")
+        self.declare_parameter("factory_active_map", "")
+        self.declare_parameter("factory_mapping_start_command", "true")
+        self.declare_parameter("factory_mapping_finish_command", "true")
+        self.declare_parameter("factory_mapping_cancel_command", "true")
         self.declare_parameter("mapping_command_timeout_s", 120.0)
         self.declare_parameter("map_import_timeout_s", 180.0)
         self.declare_parameter("enable_map_pcd_postprocess", True)
@@ -3039,9 +3033,9 @@ class WebDashboardNode(Node):
         self.declare_parameter("usage_mode_result_topic", "/m20pro_tcp_bridge/usage_mode_result")
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
-        self.declare_parameter("battery_topic", "/BATTERY_DATA")
-        self.declare_parameter("lidar_points_topic", "/LIDAR/POINTS")
-        self.declare_parameter("lidar_points_relay_subscribe_topic", "/m20pro/lidar_points_relay")
+        self.declare_parameter("battery_topic", "")
+        self.declare_parameter("lidar_points_topic", "/cloud_nav")
+        self.declare_parameter("lidar_points_relay_subscribe_topic", "")
         self.declare_parameter("enable_lidar_points_relay", False)
         self.declare_parameter("lidar_points_relay_topic", "/m20pro/lidar_points_relay")
         self.declare_parameter("scan_topic", "/scan")
@@ -3051,7 +3045,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("scan_overlay_offset_x_m", 0.0)
         self.declare_parameter("scan_overlay_offset_y_m", 0.0)
         self.declare_parameter("scan_overlay_offset_yaw_rad", 0.0)
-        self.declare_parameter("odom_topic", "/ODOM")
+        self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("map_topic", "/map")
@@ -3064,8 +3058,8 @@ class WebDashboardNode(Node):
         self.declare_parameter("annotated_image_topic", "/m20pro_yolov8_inspection/annotated_image")
         self.declare_parameter("subscribe_annotated_image", False)
         self.declare_parameter("enable_camera_proxy", False)
-        self.declare_parameter("front_camera_url", "rtsp://10.21.31.103:8554/video1")
-        self.declare_parameter("rear_camera_url", "rtsp://10.21.31.103:8554/video2")
+        self.declare_parameter("front_camera_url", "")
+        self.declare_parameter("rear_camera_url", "")
         self.declare_parameter("camera_proxy_fps", 3.0)
         self.declare_parameter("camera_proxy_jpeg_quality", 55)
         self.declare_parameter("camera_proxy_max_width", 480)
@@ -3086,6 +3080,9 @@ class WebDashboardNode(Node):
 
     def _topic(self, name: str) -> str:
         return str(self.get_parameter(name).value)
+
+    def _is_sim_runtime(self) -> bool:
+        return str(self.get_parameter("runtime_mode").value).strip().lower() == "sim"
 
     def _json_path(self, name: str) -> FsPath:
         return self.data_dir / name
@@ -3311,13 +3308,18 @@ class WebDashboardNode(Node):
         self.create_subscription(String, self._topic("usage_mode_result_topic"), self._on_usage_mode_result, 10)
         self.create_subscription(Bool, self._topic("localization_ok_topic"), self._on_localization_ok, 10)
         self.create_subscription(String, self._topic("navigation_status_topic"), self._on_navigation_status, 10)
-        if BatteryData is not None:
-            self.create_subscription(BatteryData, self._topic("battery_topic"), self._on_battery, 10)
+        battery_topic = self._topic("battery_topic").strip()
+        if BatteryData is not None and battery_topic:
+            self.create_subscription(BatteryData, battery_topic, self._on_battery, 10)
+        elif self._is_sim_runtime():
+            self.get_logger().info("simulation runtime: battery display is disabled")
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
-        self.create_subscription(PointCloud2, self._topic("lidar_points_topic"), self._on_lidar_points, 2)
+        lidar_topic = self._topic("lidar_points_topic").strip()
+        if lidar_topic:
+            self.create_subscription(PointCloud2, lidar_topic, self._on_lidar_points, 2)
         relay_subscribe_topic = self._topic("lidar_points_relay_subscribe_topic")
-        if relay_subscribe_topic and relay_subscribe_topic != self._topic("lidar_points_topic"):
+        if relay_subscribe_topic and relay_subscribe_topic != lidar_topic:
             self.create_subscription(
                 PointCloud2,
                 relay_subscribe_topic,
@@ -3829,7 +3831,7 @@ class WebDashboardNode(Node):
                 "failures": 1,
                 "navigation_warnings": 0,
                 "warnings": 0,
-                "summary": "基础自检异常中断，请重启全量系统或查看服务日志",
+                "summary": "基础自检异常中断，请重启仿真系统或查看启动终端日志",
             }
             with self._preflight_lock:
                 self._last_preflight = result
@@ -3911,7 +3913,7 @@ class WebDashboardNode(Node):
                 "failures": 1,
                 "navigation_warnings": 0,
                 "warnings": 0,
-                "summary": "基础自检异常中断，请重启全量系统或查看服务日志",
+                "summary": "基础自检异常中断，请重启仿真系统或查看启动终端日志",
                 "request_id": request_id,
             }
         finally:
@@ -3921,6 +3923,7 @@ class WebDashboardNode(Node):
             self._preflight_run_lock.release()
 
     def _run_preflight_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        sim_runtime = self._is_sim_runtime()
         mode = str(payload.get("mode") or "move").strip()
         if mode not in ("move", "shadow"):
             mode = "move"
@@ -3950,17 +3953,29 @@ class WebDashboardNode(Node):
             )
 
         node_names = set(self.get_node_names())
-        required_nodes = [
-            "m20pro_tcp_bridge",
-            "m20pro_pointcloud_fusion",
-            "m20pro_web_dashboard",
-            "map_server",
-            "controller_server",
-            "planner_server",
-            "bt_navigator",
-            "m20pro_nav2_startup_gate",
-            "m20pro_floor_manager",
-        ]
+        if sim_runtime:
+            required_nodes = [
+                "m20pro_tcp_bridge",
+                "m20pro_dual_lidar_simulator",
+                "m20pro_pointcloud_fusion",
+                "m20pro_web_dashboard",
+                "map_server",
+                "controller_server",
+                "planner_server",
+                "bt_navigator",
+                "m20pro_floor_manager",
+            ]
+        else:
+            required_nodes = [
+                "m20pro_tcp_bridge",
+                "m20pro_pointcloud_fusion",
+                "m20pro_web_dashboard",
+                "map_server",
+                "controller_server",
+                "planner_server",
+                "bt_navigator",
+                "m20pro_floor_manager",
+            ]
         missing_nodes = [name for name in required_nodes if name not in node_names]
         add(
             "nodes",
@@ -3971,9 +3986,13 @@ class WebDashboardNode(Node):
 
         topic_names = {name for name, _types in self.get_topic_names_and_types()}
         base_topics = [
-            self._topic("lidar_points_topic"),
-            self._topic("navigation_status_topic"),
-            self._topic("map_topic"),
+            topic
+            for topic in (
+                self._topic("lidar_points_topic"),
+                self._topic("navigation_status_topic"),
+                self._topic("map_topic"),
+            )
+            if topic
         ]
         navigation_topics = [
             self._topic("scan_topic"),
@@ -4040,12 +4059,12 @@ class WebDashboardNode(Node):
         elif scan_ok and finite_ranges > 0:
             lidar_status = "warn"
             lidar_message = (
-                f"未直接缓存原始点云，但 /scan 新鲜且有效距离 {finite_ranges}；"
-                "工位自检按感知链路可用处理"
+                f"未直接缓存 /cloud_nav，但 /scan 新鲜且有效距离 {finite_ranges}；"
+                "仿真感知链路按可用处理"
             )
         else:
             lidar_status = "fail"
-            lidar_message = "未收到 /LIDAR/POINTS，也没有可用 /scan"
+            lidar_message = f"未收到 {self._topic('lidar_points_topic')}，也没有可用 /scan"
         add(
             "lidar_points",
             "原始点云",
@@ -4069,12 +4088,12 @@ class WebDashboardNode(Node):
         odom_finite = bool(isinstance(odom, dict) and odom.get("finite"))
         add(
             "odom",
-            "原厂里程计",
+            "仿真里程计",
             "ok" if odom_ok and odom_finite else "warn",
             (
                 f"位姿有效 / {fmt_age_text(odom_age)}"
                 if odom_age is not None and odom_finite
-                else "未收到有效 /ODOM；原厂未定位时可能出现 inf/异常坐标"
+                else "未收到有效 /odom；请确认 sim_bridge 正在运行"
             ),
             group="navigation",
         )
@@ -4091,7 +4110,7 @@ class WebDashboardNode(Node):
             (
                 f"x={float(pose.get('x', 0.0)):.2f} y={float(pose.get('y', 0.0)):.2f}"
                 if pose_has_stamp
-                else "未收到有效 /m20pro_tcp_bridge/map_pose；到测试场地后先重定位"
+                else "未收到有效 /m20pro_tcp_bridge/map_pose；请先在仿真中设置起始位姿"
             ),
             group="navigation",
         )
@@ -4107,14 +4126,14 @@ class WebDashboardNode(Node):
             (
                 "localization_ok=true"
                 if loc_ok
-                else "当前在工位/未重定位，定位未确认是预期状态；到测试场地后先重定位"
+                else "仿真定位未确认；请在定位页设置起始位姿"
             ),
             group="navigation",
         )
 
         add(
             "navigation_status",
-            "原厂导航状态",
+            "导航状态",
             "ok" if nav_status_text else "warn",
             nav_status_text or "暂未收到 navigation_status",
         )
@@ -4135,7 +4154,7 @@ class WebDashboardNode(Node):
                 (
                     f"{local_costmap.get('width')}x{local_costmap.get('height')} / {fmt_age_text(local_age)}"
                     if isinstance(local_costmap, dict)
-                    else "未重定位前 Nav2/costmap 允许延后启动；先完成重定位再严格检查"
+                    else "未设置起始位姿前 Nav2/costmap 可能延后；先执行一次定位"
                 ),
                 group="navigation",
             )
@@ -4146,7 +4165,7 @@ class WebDashboardNode(Node):
                 (
                     f"{global_costmap.get('width')}x{global_costmap.get('height')} / {fmt_age_text(global_age)}"
                     if isinstance(global_costmap, dict)
-                    else "未重定位前 Nav2/costmap 允许延后启动；先完成重定位再严格检查"
+                    else "未设置起始位姿前 Nav2/costmap 可能延后；先执行一次定位"
                 ),
                 group="navigation",
             )
@@ -4178,19 +4197,22 @@ class WebDashboardNode(Node):
         primary = battery.get("primary") if isinstance(battery, dict) else None
         battery_level = int(primary.get("level", 0)) if isinstance(primary, dict) else 0
         min_level = int(self.get_parameter("preflight_min_battery_level").value)
-        add(
-            "battery",
-            "电量",
-            "ok" if isinstance(primary, dict) and battery_level >= min_level else "fail",
-            f"{battery_level}% / 最低要求 {min_level}%" if isinstance(primary, dict) else "未收到电池数据",
-        )
+        if sim_runtime:
+            add("battery", "电量", "info", "仿真模式不检查电池数据")
+        else:
+            add(
+                "battery",
+                "电量",
+                "ok" if isinstance(primary, dict) and battery_level >= min_level else "fail",
+                f"{battery_level}% / 最低要求 {min_level}%" if isinstance(primary, dict) else "未收到电池数据",
+            )
 
-        if workstation_mode or unlocalized:
+        if (workstation_mode or unlocalized) and not sim_runtime:
             add(
                 "nav2_lifecycle_deferred",
                 "Nav2 生命周期",
                 "info",
-                "当前在工位/未重定位，Nav2 可由启动门延后激活；重定位后再确认 active",
+                "未重定位前 Nav2 可延后激活；重定位后再确认 active",
                 group="navigation",
             )
         else:
@@ -4206,22 +4228,30 @@ class WebDashboardNode(Node):
                     group="navigation",
                 )
 
-        motion = self._detect_motion_mode()
-        if mode == "move":
-            motion_ok = motion.get("mode") == "move"
+        if sim_runtime:
             add(
                 "motion_mode",
                 "运动模式",
-                "ok" if motion_ok else "fail",
-                motion.get("message") or "未确认 move 模式，请用 104_start_real_move.sh 全量启动",
+                "ok",
+                "仿真模式，不检查真实运动进程",
             )
         else:
-            add(
-                "motion_mode",
-                "运动模式",
-                "ok" if motion.get("mode") in ("shadow", "move") else "warn",
-                motion.get("message") or "未确认运动模式",
-            )
+            motion = self._detect_motion_mode()
+            if mode == "move":
+                motion_ok = motion.get("mode") == "move"
+                add(
+                    "motion_mode",
+                    "运动模式",
+                    "ok" if motion_ok else "fail",
+                    motion.get("message") or "未确认 move 模式",
+                )
+            else:
+                add(
+                    "motion_mode",
+                    "运动模式",
+                    "ok" if motion.get("mode") in ("shadow", "move") else "warn",
+                    motion.get("message") or "未确认运动模式",
+                )
 
         failures = [item for item in items if item["status"] == "fail" and item.get("group") == "base"]
         if not perception_ok and not any(item.get("key") == "lidar_points" for item in failures):
@@ -4248,11 +4278,14 @@ class WebDashboardNode(Node):
         relocalization_ready = bool(map_ok and perception_ok and not relocalization_blockers)
         failure_labels = "、".join(str(item.get("label") or item.get("key")) for item in failures)
         if not failures:
-            summary = (
-                "基础自检通过，导航已就绪"
-                if not navigation_failures
-                else "基础自检通过，当前在工位，导航待到测试场地重定位后确认"
-            )
+            if sim_runtime:
+                summary = "仿真基础自检通过，导航已就绪" if not navigation_failures else "仿真基础自检通过，导航仍有提醒"
+            else:
+                summary = (
+                    "基础自检通过，导航已就绪"
+                    if not navigation_failures
+                    else "基础自检通过，导航待重定位后确认"
+                )
         elif relocalization_ready:
             summary = (
                 f"基础自检未通过：{len(failures)} 项失败"
@@ -4265,8 +4298,8 @@ class WebDashboardNode(Node):
             "navigation_ready": not navigation_failures,
             "relocalization_ready": relocalization_ready,
             "mode": mode,
-            "site": "workstation" if workstation_mode else site,
-            "site_mode": "workstation" if workstation_mode else "field",
+            "site": "sim" if sim_runtime else ("workstation" if workstation_mode else site),
+            "site_mode": "sim" if sim_runtime else ("workstation" if workstation_mode else "field"),
             "workstation_mode": workstation_mode,
             "timestamp": now,
             "time_text": _now_text(),
@@ -4283,6 +4316,7 @@ class WebDashboardNode(Node):
         return {"ok": True, "preflight": result, "message": result["summary"]}
 
     def _wait_for_preflight_baseline(self) -> None:
+        sim_runtime = self._is_sim_runtime()
         deadline = time.time() + max(
             0.0,
             min(10.0, float(self.get_parameter("preflight_settle_wait_s").value)),
@@ -4303,8 +4337,9 @@ class WebDashboardNode(Node):
                 int(scan.get("finite_ranges", 0) or 0) > 0
                 and now - float(scan.get("last_update", 0.0) or 0.0) <= 2.0
             )
-            battery_ok = now - float(battery.get("last_update", 0.0) or 0.0) <= 5.0
-            if map_seen and (lidar_ok or scan_ok) and battery_ok and navigation_status:
+            battery_ok = sim_runtime or now - float(battery.get("last_update", 0.0) or 0.0) <= 5.0
+            status_ok = sim_runtime or bool(navigation_status)
+            if map_seen and (lidar_ok or scan_ok) and battery_ok and status_ok:
                 return
             time.sleep(0.1)
 
@@ -4347,30 +4382,9 @@ class WebDashboardNode(Node):
         return results
 
     def _detect_motion_mode(self) -> Dict[str, str]:
-        try:
-            output = subprocess.run(
-                ["ps", "-eo", "args"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=1.0,
-                check=False,
-            ).stdout
-        except Exception as exc:
-            return {"mode": "unknown", "message": f"无法读取进程列表：{exc}"}
-        launch_lines = [
-            line
-            for line in output.splitlines()
-            if "m20pro_bringup" in line and ("m20pro.launch.py" in line or "m20pro_real_full.sh" in line)
-        ]
-        joined = "\n".join(launch_lines)
-        if "enable_axis_command:=true" in joined or "m20pro_real_full.sh move" in joined:
-            return {"mode": "move", "message": "已确认 move：运动控制已放开"}
-        if "enable_axis_command:=false" in joined or "m20pro_real_full.sh shadow" in joined:
-            return {"mode": "shadow", "message": "当前是 shadow：不会下发运动控制"}
-        if launch_lines:
-            return {"mode": "unknown", "message": "找到 real launch，但未确认 enable_axis_command"}
-        return {"mode": "unknown", "message": "未找到全量 real 启动进程"}
+        if self._is_sim_runtime():
+            return {"mode": "sim", "message": "仿真模式，不检查真实运动进程"}
+        return {"mode": "unknown", "message": "当前仓库是仿真项目，不支持真实运动模式检测"}
 
     def _select_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip() or None
@@ -4456,6 +4470,13 @@ class WebDashboardNode(Node):
         return result
 
     def _check_mapping_environment(self) -> Dict[str, Any]:
+        if self._is_sim_runtime():
+            return {
+                "ok": True,
+                "mode": "sim",
+                "message": "仿真项目不检查远端建图环境；请使用项目内置地图或导入本地地图目录。",
+                "map_archive_dir": str(self.map_archive_dir),
+            }
         factory_host = str(self.get_parameter("factory_host").value).strip()
         factory_user = str(self.get_parameter("factory_user").value).strip()
         active_map = str(self.get_parameter("factory_active_map").value).strip()
@@ -4488,7 +4509,7 @@ class WebDashboardNode(Node):
             )
         except Exception as exc:
             return self._error(
-                "106 建图环境检查失败",
+                "远端建图环境检查失败",
                 {
                     "factory_host": factory_host,
                     "factory_user": factory_user,
@@ -4508,11 +4529,11 @@ class WebDashboardNode(Node):
             "output": result.stdout or "",
         }
         if ok:
-            payload["message"] = "106 建图环境可用：SSH、drmap、active map、sudo -n 均通过。"
+            payload["message"] = "远端建图环境可用：SSH、drmap、active map、sudo -n 均通过。"
         else:
             payload["message"] = (
-                "106 建图环境未通过。常见原因：104 到 106 未配置 SSH 免密，"
-                "或 106 上 sudo drmap 仍需要交互输入密码。"
+                "远端建图环境未通过。常见原因：SSH 免密未配置，"
+                "或远端 sudo drmap 仍需要交互输入密码。"
             )
         return payload
 
@@ -4526,6 +4547,11 @@ class WebDashboardNode(Node):
         source = str(payload.get("source") or self.get_parameter("factory_active_map").value).strip()
         factory_host = str(payload.get("factory_host") or self.get_parameter("factory_host").value).strip()
         factory_user = str(payload.get("factory_user") or self.get_parameter("factory_user").value).strip()
+        if self._is_sim_runtime():
+            factory_host = "localhost"
+            factory_user = ""
+            if not source:
+                return self._error("请填写本地地图目录，目录内应包含 occ_grid.yaml 或 map.yaml")
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         default_name = f"{floor}_{stamp}"
         map_name = _sanitize_name(str(payload.get("map_name") or ""), default_name)
@@ -4553,16 +4579,16 @@ class WebDashboardNode(Node):
                 command_output = result.stdout or ""
                 if result.returncode != 0:
                     return self._error(
-                        "从 106 拉取地图失败，请确认 104 到 106 的 SSH/scp 可用",
+                        "远端地图复制失败，请确认 SSH/scp 可用",
                         {"command": command_text, "output": command_output},
                     )
         except Exception as exc:
-            return self._error("从 106 拉取地图失败", {"error": str(exc)})
+            return self._error("地图导入失败", {"error": str(exc)})
 
         yaml_path = self._find_map_yaml(dest)
         if yaml_path is None:
             return self._error(
-                "地图已拉取，但没有找到 occ_grid.yaml/map.yaml/jueying.yaml",
+                "地图已复制，但没有找到 occ_grid.yaml/map.yaml/jueying.yaml",
                 {"directory": str(dest), "command": command_text, "output": command_output},
             )
 
@@ -4576,7 +4602,7 @@ class WebDashboardNode(Node):
             "building": (session or {}).get("building"),
             "directory": str(dest),
             "yaml_path": str(yaml_path),
-            "source": "106_active_map",
+            "source": "local_import" if self._is_sim_runtime() else "active_map_import",
             "source_path": source,
             "created_at": _now_text(),
         }
@@ -4590,7 +4616,7 @@ class WebDashboardNode(Node):
             self._save_json("maps.json", self._maps)
             self._save_json("settings.json", self._settings)
             self._save_json("mapping_sessions.json", self._sessions)
-        self._append_event("从 106 拉取地图完成", {"map_id": map_record["id"], "floor": floor})
+        self._append_event("导入地图完成", {"map_id": map_record["id"], "floor": floor})
         return {
             "ok": True,
             "map": map_record,
@@ -4677,7 +4703,7 @@ class WebDashboardNode(Node):
                 "available": False,
                 "map_id": record.get("id"),
                 "status": "missing_file",
-                "message": "3D 地形文件不存在，请重新从 106 拉取地图",
+                "message": "3D 地形文件不存在，请重新导入地图",
             }
         try:
             payload = self._read_json_file(terrain_path)
@@ -5447,10 +5473,10 @@ class WebDashboardNode(Node):
                 break
             time.sleep(0.2)
 
-        factory_pose_accepted = localization_ok and pose_ok and pose_near_request
+        pose_accepted = localization_ok and pose_ok and pose_near_request
         checks = {
             "initialpose_published": "ok",
-            "factory_initialpose": "ok" if factory_pose_accepted else "warn",
+            "sim_initialpose": "ok" if pose_accepted else "warn",
             "tcp_2101_diagnostic": (
                 "ok"
                 if accepted
@@ -5464,7 +5490,7 @@ class WebDashboardNode(Node):
             "global_costmap": "ok" if global_costmap_ok else "warn",
         }
         required_checks = (
-            checks["factory_initialpose"],
+            checks["sim_initialpose"],
             checks["localization"],
             checks["map_pose"],
             checks["pose_near_request"],
@@ -5476,25 +5502,25 @@ class WebDashboardNode(Node):
         vendor_failed = result_age_ok and result_text.startswith("failed:")
         if navigation_ready:
             message = "重定位已生效，导航链路已恢复"
-        elif factory_pose_accepted:
-            message = "原厂定位位姿已更新，但导航链路尚未全部恢复，请看 verification 检查项"
+        elif pose_accepted:
+            message = "仿真位姿已更新，但导航链路尚未全部恢复，请看 verification 检查项"
         elif accepted:
-            message = "103 TCP 接受了诊断重定位请求，但还未看到地图位姿更新"
+            message = "收到重定位诊断结果，但还未看到地图位姿更新"
         elif vendor_failed:
-            message = "已发布 /initialpose，但未看到原厂定位更新；103 TCP 诊断失败不作为网页重定位成败依据"
+            message = "已发布 /initialpose，但未看到仿真位姿更新"
         else:
-            message = "已发布 /initialpose；暂未确认 106 原厂定位生效，请继续按地图和激光轮廓调整后重试"
+            message = "已发布 /initialpose；暂未确认仿真位姿更新，请继续按地图和激光轮廓调整后重试"
         return {
-            "request_accepted": bool(factory_pose_accepted),
+            "request_accepted": bool(pose_accepted),
             "initialpose_published": True,
             "tcp_2101_accepted": accepted,
             "tcp_2101_diagnostic_only": True,
-            "factory_pose_accepted": factory_pose_accepted,
+            "pose_accepted": pose_accepted,
             "navigation_ready": navigation_ready,
             "message": message,
             "result": (
                 result_text
-                or "未收到 103 TCP /m20pro_tcp_bridge/relocalization_result；网页重定位以 /initialpose 后的 106 定位状态为准"
+                or "未收到额外重定位诊断结果；网页重定位以 /initialpose 后的仿真位姿为准"
             ),
             "pose_error_m": pose_error_m,
             "yaw_error_rad": yaw_error_rad,
@@ -5926,7 +5952,7 @@ class WebDashboardNode(Node):
             return {
                 "ok": False,
                 "manual_required": True,
-                "message": "该步骤的 106 原厂命令还没有配置。请先用手柄/官方工具完成该步骤，再执行拉取地图。",
+                "message": "该步骤的建图命令还没有配置。请先完成建图，再导入地图。",
                 "command_parameter": param_name,
             }
         try:

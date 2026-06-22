@@ -13,6 +13,7 @@ def generate_launch_description():
 
     host = LaunchConfiguration("host")
     port = LaunchConfiguration("port")
+    runtime_mode = LaunchConfiguration("runtime_mode")
     data_dir = LaunchConfiguration("data_dir")
     map_archive_dir = LaunchConfiguration("map_archive_dir")
     robot_pose_display_yaw_offset_rad = LaunchConfiguration("robot_pose_display_yaw_offset_rad")
@@ -35,10 +36,15 @@ def generate_launch_description():
     camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
     initialpose_topic = LaunchConfiguration("initialpose_topic")
     relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
+    battery_topic = LaunchConfiguration("battery_topic")
+    lidar_points_topic = LaunchConfiguration("lidar_points_topic")
+    lidar_points_relay_subscribe_topic = LaunchConfiguration("lidar_points_relay_subscribe_topic")
+    odom_topic = LaunchConfiguration("odom_topic")
 
     return LaunchDescription([
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
         DeclareLaunchArgument("port", default_value="8080"),
+        DeclareLaunchArgument("runtime_mode", default_value="sim"),
         DeclareLaunchArgument("data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("map_archive_dir", default_value="~/m20pro_maps"),
         DeclareLaunchArgument("robot_pose_display_yaw_offset_rad", default_value="0.0"),
@@ -46,43 +52,33 @@ def generate_launch_description():
             "map_manifest",
             default_value=os.path.join(bringup_share, "config", "map_manifest.yaml"),
         ),
-        DeclareLaunchArgument("factory_host", default_value="10.21.31.106"),
-        DeclareLaunchArgument("factory_user", default_value="user"),
+        DeclareLaunchArgument("factory_host", default_value="localhost"),
+        DeclareLaunchArgument("factory_user", default_value=""),
         DeclareLaunchArgument(
             "factory_active_map",
-            default_value="/var/opt/robot/data/maps/active",
+            default_value="",
         ),
         DeclareLaunchArgument(
             "factory_mapping_start_command",
-            default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"nohup sudo -n drmap mapping -s -n {map_name} > "
-                "/tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &\""
-            ),
-            description="Shell command template for starting drmap mapping on 106.",
+            default_value="true",
+            description="No-op command in the simulation project.",
         ),
         DeclareLaunchArgument(
             "factory_mapping_finish_command",
-            default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"sudo -n drmap stop_mapping\""
-            ),
-            description="Shell command template for stopping/saving drmap mapping on 106.",
+            default_value="true",
+            description="No-op command in the simulation project.",
         ),
         DeclareLaunchArgument(
             "factory_mapping_cancel_command",
-            default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"sudo -n drmap stop_mapping\""
-            ),
-            description="Shell command template for cancelling drmap mapping on 106.",
+            default_value="true",
+            description="No-op command in the simulation project.",
         ),
         DeclareLaunchArgument("enable_map_pcd_postprocess", default_value="true"),
         DeclareLaunchArgument("pcd_terrain_cell_size", default_value="0.25"),
         DeclareLaunchArgument("stair_zones_topic", default_value="/m20pro/stair_zones"),
         DeclareLaunchArgument("enable_camera_proxy", default_value="false"),
-        DeclareLaunchArgument("front_camera_url", default_value="rtsp://10.21.31.103:8554/video1"),
-        DeclareLaunchArgument("rear_camera_url", default_value="rtsp://10.21.31.103:8554/video2"),
+        DeclareLaunchArgument("front_camera_url", default_value=""),
+        DeclareLaunchArgument("rear_camera_url", default_value=""),
         DeclareLaunchArgument("camera_proxy_fps", default_value="3.0"),
         DeclareLaunchArgument("camera_proxy_jpeg_quality", default_value="55"),
         DeclareLaunchArgument("camera_proxy_max_width", default_value="480"),
@@ -92,6 +88,10 @@ def generate_launch_description():
             "relocalization_result_topic",
             default_value="/m20pro_tcp_bridge/relocalization_result",
         ),
+        DeclareLaunchArgument("battery_topic", default_value=""),
+        DeclareLaunchArgument("lidar_points_topic", default_value="/cloud_nav"),
+        DeclareLaunchArgument("lidar_points_relay_subscribe_topic", default_value=""),
+        DeclareLaunchArgument("odom_topic", default_value="/odom"),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
@@ -101,6 +101,7 @@ def generate_launch_description():
                 {
                     "host": host,
                     "port": port,
+                    "runtime_mode": runtime_mode,
                     "data_dir": data_dir,
                     "map_archive_dir": map_archive_dir,
                     "robot_pose_display_yaw_offset_rad": ParameterValue(
@@ -138,6 +139,10 @@ def generate_launch_description():
                     "camera_proxy_transport": camera_proxy_transport,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,
+                    "battery_topic": battery_topic,
+                    "lidar_points_topic": lidar_points_topic,
+                    "lidar_points_relay_subscribe_topic": lidar_points_relay_subscribe_topic,
+                    "odom_topic": odom_topic,
                 }
             ],
         ),

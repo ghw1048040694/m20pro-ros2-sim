@@ -1,7 +1,7 @@
 # Inspection waypoint template for the future mission manager.
 #
 # Coordinates are in the floor map frame used by Nav2.
-# For real robot deployment, use poses from the 106 active map copied to 104.
+# For simulation, these waypoints are placeholders tied to the bundled maps.
 # yaw is in radians.
 
 mission:
@@ -113,7 +113,7 @@ floors:
         camera: "front_wide"
         target_classes: []
         required_events: []
-        notes: "Replace with a real safe start-area inspection pose."
+        notes: "Replace with a verified safe start-area inspection pose."
 
       - id: "corridor_check"
         label: "19层走廊检查"
