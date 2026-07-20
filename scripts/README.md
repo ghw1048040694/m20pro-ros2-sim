@@ -13,3 +13,38 @@ Use `false` as the first argument to start without RViz:
 ```bash
 ./scripts/start_sim.sh false
 ```
+
+## VLA / Isaac Lab environment
+
+The embodied-learning environment is isolated in the `m20pro-vla` Conda
+environment. It uses Python 3.11, Isaac Sim 5.1, Isaac Lab 2.3.2, PyTorch
+2.7/CUDA 12.8, and RSL-RL.
+
+```bash
+./scripts/install_vla_env.sh
+source ./scripts/activate_vla_env.sh
+./scripts/check_vla_env.sh
+```
+
+Isaac Sim needs most of the RTX 3060's 12 GB VRAM. Stop other GPU training
+jobs before launching it. The first simulator launch requires accepting the
+NVIDIA Omniverse license in the terminal.
+
+Convert and validate the M20 Pro asset:
+
+```bash
+./scripts/convert_m20pro_urdf.sh
+./scripts/test_m20pro_asset.sh
+```
+
+The first locomotion task configuration can be checked with:
+
+```bash
+TERM=xterm python scripts/check_m20pro_task.py --headless
+```
+
+Run the first real environment reset/step smoke test:
+
+```bash
+./scripts/smoke_m20pro_locomotion.sh --num-envs 1 --steps 4
+```

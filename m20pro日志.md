@@ -1,6 +1,16 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-22 12:58 CST
+Last updated: 2026-07-20 17:35 CST
+
+## 2026-07-20 17:35 CST - VLA / Isaac Lab 仿真环境完成配置
+
+- 具身项目明确为纯仿真，不做 sim2real；新环境只位于独立 sim workspace，未修改 real workspace 或访问 103/104/106。
+- 已创建独立 Conda 环境 `m20pro-vla`，固定 Python 3.11.15、PyTorch 2.7.0+cu128、Isaac Sim 5.1.0、Isaac Lab v2.3.2 和 RSL-RL 3.1.2。
+- Isaac Lab 源码固定在 `.deps/IsaacLab` 的 `v2.3.2` 标签；NVIDIA 的 2.8GB/1.25GB 大型扩展缓存 wheel 保存到已忽略的 `.deps/wheels`，安装脚本使用 `wget --continue` 支持断点续传。
+- 新增 `install_vla_env.sh`、`activate_vla_env.sh` 和 `check_vla_env.sh`；安装器只安装本项目需要的 Isaac Lab 核心/资产/任务/RSL-RL，不安装与 Isaac Sim 5.1 `psutil` 强类型约束冲突的 Mimic/Jupyter 扩展。
+- 已通过包版本检查和 RTX 3060 CUDA 张量计算；`torch.cuda.is_available()=True`，compute capability 为 8.6。环境约 19GB，`.deps` 约 4.2GB，安装后磁盘剩余约 58GB。
+- 已知的唯一 `pip check` 差异是官方元数据冲突：Isaac Lab 2.3.2 声明 `starlette==0.49.1`，Isaac Sim 5.1 内的 FastAPI 要求 `starlette<0.46`；当前优先保持模拟器运行时的 `starlette==0.45.3`，安装脚本只豁免该一条。
+- NVIDIA Omniverse EULA 未由 Codex 代为接受；首次正式启动时必须由用户本人阅读并确认。当前另一个 `dime-uuv-gpu` 训练进程占用约 9GB 显存，启动 Isaac Sim 前需先停止。
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 

@@ -41,6 +41,17 @@ bags/
 # Third-party reference workspace kept locally, not part of this project
 dddmr_navigation/
 /x30_core_nav_slam/
+/.deps/
+
+# Isaac Sim / Isaac Lab runtime output
+/.isaac-cache/
+/outputs/
+/wandb/
+/logs/
+/assets/m20pro/*.usd
+/assets/m20pro/.asset_hash
+/assets/m20pro/config.yaml
+/assets/m20pro/configuration/
 
 # Local map editor/export metadata
 **/.optimizers/
