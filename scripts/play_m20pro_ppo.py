@@ -8,6 +8,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--checkpoint", required=True)
+parser.add_argument("--task", default="M20Pro-Locomotion-Flat-v0")
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument("--steps", type=int, default=500)
 parser.add_argument("--video", action="store_true", help="Record an MP4 while replaying.")
@@ -25,16 +26,17 @@ import torch  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
-from tasks.m20pro_locomotion import M20ProLocomotionEnvCfg  # noqa: E402
-from tasks.m20pro_locomotion.agents import M20ProLocomotionPPORunnerCfg  # noqa: E402
+from tasks.m20pro_locomotion import M20ProJumpEnvCfg, M20ProLocomotionEnvCfg  # noqa: E402
+from tasks.m20pro_locomotion.agents import M20ProJumpPPORunnerCfg, M20ProLocomotionPPORunnerCfg  # noqa: E402
 
 env = None
 try:
-    env_cfg = M20ProLocomotionEnvCfg()
+    is_jump = args.task == "M20Pro-Jump-Direct-v0"
+    env_cfg = M20ProJumpEnvCfg() if is_jump else M20ProLocomotionEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.sim.device = args.device or "cuda:0"
-    agent_cfg = M20ProLocomotionPPORunnerCfg()
-    env = gym.make("M20Pro-Locomotion-Flat-v0", cfg=env_cfg, render_mode="rgb_array" if args.video else None)
+    agent_cfg = M20ProJumpPPORunnerCfg() if is_jump else M20ProLocomotionPPORunnerCfg()
+    env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.video else None)
     if args.video:
         env = gym.wrappers.RecordVideo(
             env,
@@ -70,7 +72,8 @@ try:
         integrated_x += forward_velocity * step_dt
         action_magnitude += torch.mean(torch.abs(actions), dim=-1)
         leg_action_magnitude += torch.mean(torch.abs(actions[:, :12]), dim=-1)
-        wheel_action_magnitude += torch.mean(torch.abs(actions[:, 12:]), dim=-1)
+        if actions.shape[1] > 12:
+            wheel_action_magnitude += torch.mean(torch.abs(actions[:, 12:]), dim=-1)
         leg_velocity_magnitude += torch.mean(torch.abs(env.unwrapped.robot.data.joint_vel[:, :12]), dim=-1)
         wheel_velocity_magnitude += torch.mean(torch.abs(env.unwrapped.robot.data.joint_vel[:, 12:]), dim=-1)
         leg_position_sum += env.unwrapped.robot.data.joint_pos[:, :12]

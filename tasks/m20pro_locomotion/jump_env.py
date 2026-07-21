@@ -24,18 +24,18 @@ class M20ProJumpEnv(M20ProLocomotionEnv):
         previous_max = self.max_base_height.clone()
         self.max_base_height = torch.maximum(self.max_base_height, base_height)
         jump_progress = torch.clamp((self.max_base_height - self.cfg.initial_base_height) / 0.30, 0.0, 1.0)
-        height_tracking = torch.exp(-torch.square(self.max_base_height - self.cfg.target_jump_height) / 0.04)
+        height_tracking = torch.exp(-torch.square(self.max_base_height - self.cfg.target_jump_height) / 0.01)
         upward_velocity = torch.clamp(self.velocity[:, 2], min=0.0, max=2.0)
         upright = torch.clamp((self.up_proj - 0.75) / 0.25, min=0.0, max=1.0)
         leg_posture_cost = torch.sum(torch.square(self.dof_pos[:, :12]), dim=-1)
         leg_action_cost = torch.sum(torch.square(self.actions), dim=-1)
         progress_reward = self.max_base_height - previous_max
         reward = (
-            2.0 * jump_progress
+            4.0 * jump_progress
             + 1.0 * height_tracking
-            + 0.5 * upward_velocity
+            + 1.0 * upward_velocity
             + 0.5 * upright
-            + 4.0 * progress_reward
+            + 8.0 * progress_reward
             - 0.02 * leg_posture_cost
             - 0.005 * leg_action_cost
         )
