@@ -76,6 +76,8 @@ Last updated: 2026-07-21 CST
 - 已将 `M20Pro-Jump-Direct-v0` 注册到 Gym 并接入 `M20ProJumpPPORunnerCfg`；同一个 `train_m20pro_ppo.sh` 可通过 `--task` 切换平地巡航与腿部跳跃。跳跃任务现在还是原地跳跃，尚未加障碍物和 1 m 课程。
 - 首版 jump 训练已完成 300 次迭代并生成 `model_299.pt`，但 16 环境 × 200 步回放的最低高度仅 `0.5874 m`，腿动作平均 `0.1088`，基本是原地站立而非起跳。原因是初始高度 0.62 m 在旧高度奖励中已能获得过高收益。
 - 已改跳跃奖励：收紧 0.80 m 峰值高度奖励，增大起跳高度进度、向上速度和最高高度进度奖励；新版还未重新训练。
+- jump v2 回放表明腿部会动但不起跳：最低高度 `0.4978 m`、腿速 `1.6128 rad/s`、平均前向速度 `0.3375 m/s`，表明不对称腿动作在制造水平漂移。
+- jump v3 加入 57 维 phase 观测（下蹲、起跳、腾空三阶段），并将 episode 缩短到 2 s 以增强时序学习。新版已通过 4 环境 × 24 步 smoke，但尚未重新训练；旧 jump checkpoint 与 57 维观测不兼容。
 - 已记录 PPO 指标含义：`Loss/value_function` 是 critic 价值回归误差，`Loss/surrogate` 是 PPO 裁剪策略损失，`Policy/mean_noise_std` 是 actor 输出动作分布的平均探索标准差。
 
 ## 常用验证
