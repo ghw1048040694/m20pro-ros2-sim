@@ -19,6 +19,7 @@ Last updated: 2026-07-21 CST
 - Isaac Lab v2.3.2 / package 0.54.2
 - RSL-RL 3.1.2
 - GPU：RTX 3060 12 GB，compute capability 8.6
+- Python 运行环境确认：Isaac Sim、Isaac Lab、PyTorch 和 RSL-RL 均运行在 Conda 环境 `m20pro-vla`，解析器为 `/home/fabu/miniconda3/envs/m20pro-vla/bin/python`。
 - NVIDIA EULA 已由用户阅读并接受；激活脚本使用 `OMNI_KIT_ACCEPT_EULA=Y`
 
 ## 已完成
