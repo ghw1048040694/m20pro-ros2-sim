@@ -163,16 +163,23 @@ Last updated: 2026-07-22 CST
 - 普通“向前走”回归测试仍通过：250 步位移 `7.3197 m`、平均速度 `0.3669 m/s`、最低根高 `0.5152 m`、`terminated_steps=0`。空间视觉能力没有破坏原生 rolling 动作质量。
 - 对应 MP4 和 JSON 位于 `videos/m20_vla_bc_v4/{red,blue,green,forward}/` 与 `logs/m20_vla_bc_v4_*.json`。这只是固定场景下的“看到指定颜色目标并停车”里程碑；尚未覆盖随机目标位置、主动转向搜索、开放词汇、地图/无地图探索、障碍物和跳跃，不能宣称完整任务已完成。
 
+### 主动视觉搜索专家边界（2026-07-22 续）
+
+- 公开 `AI-DA-STC/M20-autonomy-sim` README 明确显示其 M20 ONNX 是 `/cmd_vel -> RL locomotion` 低层控制器；公开仓库的导航部分是 CMU/FAR/local planner，没有 M20 jump policy 或视觉目标搜索专家 checkpoint。该公开经验可以作为 VLA 的同构 rolling 专家，但不能直接提供完整 ObjectNav/jump 示范。
+- 尝试用目标真值生成离线专家：连续 bearing command、差速轮覆盖、固定 turn→forward 技能串联都做了带 MP4 的 smoke。它们分别出现异常角速度、命中后惯性回滑、目标未到达等问题，全部 `success=false`，已删除对应 HDF5/MP4，未进入训练集。`command_y=0.5` 协议测试也不是侧移，而是倒退并伴随转向，不能当横向导航专家。
+- 当前可复用的数据仍只包括固定直线目标和公开 rolling/backward/turn 正样本；下一次搜索必须先解决原生 turn/forward 技能的物理切换和刹停，再采集随机方位目标，不能用失败轨迹硬训模型。
+
 ### Jump 专家搜索边界（2026-07-22）
 
 - GitHub/API 搜索了 M20/DeepRobotics/wheel-legged parkour 公开仓库，没有找到可复用的 M20 jump checkpoint；保留的原生 M20公开专家只有 rolling `policy.onnx`。
 - 新增 [search_m20_jump_expert.py](scripts/search_m20_jump_expert.py)，显式使用官方镜像姿态和前后腿镜像膝关节，采用 `Kp=200/Kd=4`、短下蹲/起跳目标序列，并行执行 `324` 个纯物理候选；v2 最高 `max_root_height=0.6618 m`，v3 扩展时序后最高 `0.6738 m`，所有候选均未满足 `min_root_height>=0.45 m` 的稳定判据。
 - 这证明当前 M20 USD/执行器和简单关节目标序列还不能产生可验证 1 m 跳跃；失败序列不进入 VLA 数据集。搜索结果只保留在 2 TB 盘 `logs/m20_jump_expert_search_v1/v2/v3.json`，不再继续盲目 PPO 跳跃训练。
+- 继续扩大无奖励物理搜索：腿执行器力矩 `150` 时最高 `0.882 m`，力矩 `300`、`Kp=500/Kd=8` 时最高 `0.920 m`；所有最高候选最低根高约 `0.16–0.19 m`，`survived=false`。这说明“跳得高但摔倒”不能作为专家，当前仍没有可用于 VLA 的 1 m jump action chunk。
 
 ### 数据清理与存储（2026-07-22）
 
 - 已删除旧 `logs/rsl_rl` PPO checkpoint、失败 jump HDF5/视频、重复诊断视频，以及已完成协议核对的大型源码克隆（约 `803 MB`）。
-- 只保留：`datasets/public_m20_native_v1`、`public_m20_native_backward_v1`、`public_m20_native_turn_v2`、VLA checkpoint、必要的 M20 `policy.onnx`/协议文件、Go1 checkpoint 和精简 `rsl_rl` 源码。清理后 `M20ProVLA` 总占用约 `102 MB`，训练、视频、日志全部仍位于 2 TB 盘。
+- 只保留：成功的 M20 rolling/目标数据、v4 checkpoint、必要的 M20 `policy.onnx`/协议文件、公开 Go1 checkpoint 和跳跃搜索 JSON。旧 v1-v3 checkpoint、重复视频、失败搜索 HDF5/MP4 已删除；当前 `M20ProVLA` 总占用约 `117 MB`，训练、视频、日志全部仍位于 2 TB 盘。
 - 原始来源仓库没有复制进 Git；`public_experts/m20_native/` 仅保留模型和协议快照，个人研究使用，不重新分发外部权重。
 
 ## 常用验证

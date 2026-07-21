@@ -21,6 +21,7 @@ parser.add_argument("--physics-steps", type=int, default=90, help="50 Hz control
 parser.add_argument("--top-k", type=int, default=12)
 parser.add_argument("--leg-kp", type=float, default=200.0)
 parser.add_argument("--leg-kd", type=float, default=4.0)
+parser.add_argument("--leg-effort", type=float, default=76.4)
 parser.add_argument("--json-output", type=Path, default=Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_jump_expert_search_v1.json"))
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -64,11 +65,11 @@ class Candidate:
 
 def make_candidates() -> list[Candidate]:
     result = []
-    for squat_hip in (0.8, 1.0, 1.2):
-        for squat_knee in (1.5, 2.0, 2.4):
-            for thrust_hip in (0.0, 0.15, 0.3):
-                for thrust_knee in (0.0, 0.25, 0.5):
-                    for squat_steps, thrust_steps in ((3, 15), (5, 20), (8, 25)):
+    for squat_hip in (1.5, 2.0, 2.3):
+        for squat_knee in (2.4, 2.8):
+            for thrust_hip in (-0.8, 0.0, 0.8):
+                for thrust_knee in (-1.5, -0.8, 0.0, 0.8, 1.5):
+                    for squat_steps, thrust_steps in ((3, 8), (6, 12), (10, 18)):
                         result.append(Candidate(squat_hip, squat_knee, thrust_hip, thrust_knee, squat_steps, thrust_steps, 30))
     return result
 
@@ -97,7 +98,7 @@ class JumpSearchSceneCfg(InteractiveSceneCfg):
         ),
         actuators={
             "legs": DCMotorCfg(
-                joint_names_expr=[".*_(hipx|hipy|knee)_joint"], effort_limit=76.4, saturation_effort=76.4,
+                joint_names_expr=[".*_(hipx|hipy|knee)_joint"], effort_limit=args.leg_effort, saturation_effort=args.leg_effort,
                 velocity_limit=22.4, stiffness=args.leg_kp, damping=args.leg_kd,
             ),
             "wheels_locked": ImplicitActuatorCfg(

@@ -41,6 +41,18 @@ parser.add_argument("--target-x", type=float, default=3.0)
 parser.add_argument("--target-y", type=float, default=0.0)
 parser.add_argument("--stop-after", type=int, default=None, help="Switch the expert command to zero after this control step.")
 parser.add_argument("--stop-on-target", action="store_true", help="Stop with zero action when the simulated target enters the success radius.")
+parser.add_argument("--navigate-to-target", action="store_true", help="Generate goal-directed steering demonstrations from target bearing.")
+parser.add_argument("--override-navigation-wheels", action="store_true", help="Use a geometric differential-wheel override; disabled by default for native-policy fidelity.")
+parser.add_argument("--nav-forward-speed", type=float, default=0.5)
+parser.add_argument("--nav-heading-gain", type=float, default=1.0)
+parser.add_argument("--nav-max-yaw", type=float, default=0.5)
+parser.add_argument("--nav-turn-threshold", type=float, default=0.3)
+parser.add_argument("--nav-command-hold-steps", type=int, default=30)
+parser.add_argument("--nav-fixed-turn-steps", type=int, default=0, help="Use a fixed turn skill before forward; zero keeps bearing control.")
+parser.add_argument("--stop-brake-steps", type=int, default=30, help="Navigation braking duration after entering the target radius.")
+parser.add_argument("--wheel-radius", type=float, default=0.09)
+parser.add_argument("--track-width", type=float, default=0.48)
+parser.add_argument("--episode-offset", type=int, default=0, help="First output episode index for appending scenario runs.")
 parser.add_argument("--wheel-damping", type=float, default=None, help="Isaac-only wheel Kd override; default adapts for yaw commands.")
 parser.add_argument("--task-text", default="向前走")
 parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT / "datasets/public_m20_native_v1")
@@ -54,6 +66,22 @@ if not args.video:
     parser.error("--video is required so every recorded episode has an inspectable MP4")
 if args.episodes <= 0 or args.steps <= 0:
     parser.error("--episodes and --steps must be positive")
+if args.episode_offset < 0:
+    parser.error("--episode-offset must be non-negative")
+if args.navigate_to_target and args.target_color == "none":
+    parser.error("--navigate-to-target requires a colored target")
+if args.nav_forward_speed <= 0.0 or args.nav_heading_gain <= 0.0 or args.nav_max_yaw <= 0.0:
+    parser.error("navigation gains and speed must be positive")
+if args.wheel_radius <= 0.0 or args.track_width <= 0.0:
+    parser.error("wheel geometry must be positive")
+if args.stop_brake_steps < 0:
+    parser.error("--stop-brake-steps must be non-negative")
+if args.nav_command_hold_steps <= 0:
+    parser.error("--nav-command-hold-steps must be positive")
+if args.nav_turn_threshold <= 0.0:
+    parser.error("--nav-turn-threshold must be positive")
+if args.nav_fixed_turn_steps < 0:
+    parser.error("--nav-fixed-turn-steps must be non-negative")
 if not args.policy.is_file():
     parser.error(f"M20 policy not found: {args.policy}")
 args.enable_cameras = True
@@ -192,6 +220,63 @@ def command_for_step(step: int) -> tuple[float, float, float]:
     return (args.command_x, args.command_y, args.command_yaw)
 
 
+def yaw_from_quaternion(quat: torch.Tensor) -> float:
+    values = quat.detach().cpu().numpy()
+    return float(
+        np.arctan2(
+            2.0 * (values[0] * values[3] + values[1] * values[2]),
+            1.0 - 2.0 * (values[2] ** 2 + values[3] ** 2),
+        )
+    )
+
+
+def navigation_command(robot: Articulation, target_reached: bool) -> tuple[float, float, float]:
+    if target_reached:
+        return (0.0, 0.0, 0.0)
+    delta = torch.tensor([args.target_x, args.target_y], device=robot.device) - robot.data.root_pos_w[0, :2]
+    distance = float(torch.linalg.vector_norm(delta).item())
+    target_heading = float(torch.atan2(delta[1], delta[0]).item())
+    current_heading = yaw_from_quaternion(robot.data.root_quat_w[0])
+    heading_error = float(np.arctan2(np.sin(target_heading - current_heading), np.cos(target_heading - current_heading)))
+    if abs(heading_error) > args.nav_turn_threshold:
+        yaw_command = float(np.clip(args.nav_heading_gain * heading_error, -args.nav_max_yaw, args.nav_max_yaw))
+        return (0.0, 0.0, yaw_command)
+    distance_scale = float(np.clip((distance - 0.8) / 0.8, 0.35, 1.0))
+    return (args.nav_forward_speed * distance_scale, 0.0, 0.0)
+
+
+def override_navigation_wheels(action: torch.Tensor, command: tuple[float, float, float]) -> torch.Tensor:
+    forward, _, yaw_rate = command
+    half_track = 0.5 * args.track_width
+    left_velocity = -(forward - half_track * yaw_rate) / args.wheel_radius
+    right_velocity = -(forward + half_track * yaw_rate) / args.wheel_radius
+    wheel_action = torch.tensor(
+        [[left_velocity, right_velocity, left_velocity, right_velocity]],
+        dtype=action.dtype,
+        device=action.device,
+    ).div_(5.0).clamp_(-2.5, 2.5)
+    action = action.clone()
+    action[:, 12:] = wheel_action
+    return action
+
+
+def braking_command(robot: Articulation) -> tuple[float, float, float]:
+    return (-0.25, 0.0, 0.0)
+
+
+def set_navigation_wheel_damping(robot: Articulation, command: tuple[float, float, float]) -> None:
+    if not args.navigate_to_target:
+        return
+    wheel_actuator = robot.actuators.get("wheels")
+    if wheel_actuator is None:
+        return
+    if args.override_navigation_wheels:
+        damping = 0.6
+    else:
+        damping = 3.6 if abs(command[2]) >= 0.05 and abs(command[0]) < 0.05 else 0.6
+    wheel_actuator.damping.fill_(damping)
+
+
 def rgb(camera) -> np.ndarray:
     return camera.data.output["rgb"][0, ..., :3].detach().cpu().numpy().astype(np.uint8)
 
@@ -236,20 +321,32 @@ def main() -> None:
         "format": "m20pro_native_expert_hdf5_v1", "expert": "AI-DA-STC/M20-autonomy-sim policy.onnx",
         "policy_protocol": "57 observation -> 16 action; official M20PolicyRunner; no PPO reward",
         "task_text": args.task_text, "command": [args.command_x, args.command_y, args.command_yaw],
-        "stop_after": args.stop_after, "stop_on_target": args.stop_on_target, "target_color": args.target_color,
+        "stop_after": args.stop_after, "stop_on_target": args.stop_on_target,
+        "navigate_to_target": args.navigate_to_target, "override_navigation_wheels": args.override_navigation_wheels,
+        "target_color": args.target_color,
         "target_xy": [args.target_x, args.target_y], "wheel_damping": WHEEL_DAMPING,
+        "navigation": {
+            "forward_speed": args.nav_forward_speed, "heading_gain": args.nav_heading_gain,
+            "max_yaw": args.nav_max_yaw, "turn_threshold": args.nav_turn_threshold,
+            "command_hold_steps": args.nav_command_hold_steps, "fixed_turn_steps": args.nav_fixed_turn_steps,
+            "wheel_radius": args.wheel_radius,
+            "track_width": args.track_width, "stop_brake_steps": args.stop_brake_steps,
+            "source": "public M20 ONNX leg policy plus target-bearing differential wheel expert",
+        },
         "control_hz": 50.0, "joint_names": POLICY_JOINT_NAMES,
         "observation": {"front_rgb": [args.image_height, args.image_width, 3], "rear_rgb": [args.image_height, args.image_width, 3],
-                         "lidar": [ray_count], "proprio": [57], "state": [45]},
+                         "lidar": [ray_count], "proprio": [57], "state": [45], "expert_command": [3]},
         "action": {"shape": [16], "leg": "default_pose + output[:12] * [0.125,0.25,0.25]", "wheel": "output[12:] * 5.0"},
         "success_rule": "stable plus command-direction check; target episodes also require reaching target_xy",
     }
-    (args.output_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+    metadata_name = "metadata.json" if args.episode_offset == 0 else f"metadata_run_{args.episode_offset:04d}.json"
+    (args.output_dir / metadata_name).write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     default_pose = torch.tensor([0.0, -0.6, 1.0, 0.0, -0.6, 1.0, 0.0, 0.6, -1.0, 0.0, 0.6, -1.0], device=robot.device).unsqueeze(0)
     leg_scale = LEG_ACTION_SCALE.to(robot.device).unsqueeze(0)
     zero_wheels = torch.zeros((1, 4), device=robot.device)
 
     for episode in range(args.episodes):
+        episode_id = args.episode_offset + episode
         reset_scene(scene)
         for _ in range(args.warmup_steps):
             robot.set_joint_position_target(default_pose, joint_ids=leg_ids)
@@ -258,8 +355,8 @@ def main() -> None:
             for _ in range(4):
                 sim.step(render=False)
                 scene.update(physics_dt)
-        path = args.output_dir / f"episode_{episode:04d}.h5"
-        video_path = args.video_dir / f"episode_{episode:04d}.mp4"
+        path = args.output_dir / f"episode_{episode_id:04d}.h5"
+        video_path = args.video_dir / f"episode_{episode_id:04d}.mp4"
         video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
         if not video.isOpened():
             raise RuntimeError(f"Unable to open video writer: {video_path}")
@@ -271,6 +368,13 @@ def main() -> None:
         start_yaw = float(np.arctan2(2.0 * (start_quat[0] * start_quat[3] + start_quat[1] * start_quat[2]), 1.0 - 2.0 * (start_quat[2] ** 2 + start_quat[3] ** 2)))
         yaw_delta = 0.0
         target_reached = TARGET_RGB is None
+        target_reached_step = None
+        path_length = 0.0
+        previous_xy = robot.data.root_pos_w[0, :2].clone()
+        min_target_distance = float("inf")
+        cached_navigation_command: tuple[float, float, float] | None = None
+        navigation_command_until = -1
+        target_turn_sign = 1.0 if args.target_y >= 0.0 else -1.0
         with h5py.File(path, "w") as h5:
             obs = h5.create_group("observation")
             front_ds = obs.create_dataset("front_rgb", (args.steps, args.image_height, args.image_width, 3), dtype="u1", compression="lzf")
@@ -279,11 +383,13 @@ def main() -> None:
             proprio_ds = obs.create_dataset("proprio", (args.steps, 57), dtype="f4", compression="lzf")
             state_ds = obs.create_dataset("state", (args.steps, 45), dtype="f4", compression="lzf")
             action_ds = h5.create_dataset("action", (args.steps, 16), dtype="f4", compression="lzf")
+            command_ds = h5.create_dataset("expert_command", (args.steps, 3), dtype="f4", compression="lzf")
             done_ds = h5.create_dataset("terminated", (args.steps,), dtype="u1")
             h5.attrs["task_text"] = args.task_text
             h5.attrs["command"] = np.asarray([args.command_x, args.command_y, args.command_yaw], dtype=np.float32)
             h5.attrs["stop_after"] = -1 if args.stop_after is None else args.stop_after
             h5.attrs["stop_on_target"] = args.stop_on_target
+            h5.attrs["navigate_to_target"] = args.navigate_to_target
             h5.attrs["target_color"] = args.target_color
             h5.attrs["target_xy"] = np.asarray([args.target_x, args.target_y], dtype=np.float32)
             h5.attrs["wheel_damping"] = WHEEL_DAMPING
@@ -293,20 +399,49 @@ def main() -> None:
                 if TARGET_RGB is not None:
                     target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
                     target_in_range = bool(torch.linalg.vector_norm(target_delta).item() <= 0.8)
-                    target_reached = target_reached or target_in_range
-                command = (0.0, 0.0, 0.0) if args.stop_on_target and target_reached else command_for_step(step)
-                observation = native_observation(robot, joint_ids, last_action, command)
+                    if target_in_range and not target_reached:
+                        target_reached = True
+                        target_reached_step = step
+                if args.navigate_to_target:
+                    if args.nav_fixed_turn_steps > 0 and step < args.nav_fixed_turn_steps and not target_reached:
+                        cached_navigation_command = (0.0, 0.0, target_turn_sign * args.nav_max_yaw)
+                        navigation_command_until = step + 1
+                    elif args.nav_fixed_turn_steps > 0 and step >= args.nav_fixed_turn_steps and not target_reached:
+                        cached_navigation_command = (args.nav_forward_speed, 0.0, 0.0)
+                        navigation_command_until = args.steps + 1
+                    elif cached_navigation_command is None or step >= navigation_command_until or target_reached:
+                        cached_navigation_command = navigation_command(robot, target_reached)
+                        navigation_command_until = step + args.nav_command_hold_steps
+                    command = cached_navigation_command
+                    if target_reached and target_reached_step is not None and step - target_reached_step < args.stop_brake_steps:
+                        command = braking_command(robot)
+                else:
+                    command = (0.0, 0.0, 0.0) if args.stop_on_target and target_reached else command_for_step(step)
+                set_navigation_wheel_damping(robot, command)
+                policy_command = (args.command_x, 0.0, 0.0) if args.navigate_to_target and args.override_navigation_wheels else command
+                observation = native_observation(robot, joint_ids, last_action, policy_command)
                 # A zero command from the native locomotion policy still
                 # produces residual wheel/posture actions.  For object
                 # reaching, the label after the stop point must be an
                 # unambiguous stationary target: default leg pose and zero
                 # wheel velocity, represented by an all-zero 16-D action.
-                stop_now = (args.stop_after is not None and step >= args.stop_after) or (args.stop_on_target and target_reached)
+                stop_now = (
+                    (args.stop_after is not None and step >= args.stop_after)
+                    or (args.navigate_to_target and target_reached and target_reached_step is not None
+                        and step - target_reached_step >= args.stop_brake_steps)
+                    or (args.stop_on_target and not args.navigate_to_target and target_reached)
+                )
                 if stop_now:
                     action = torch.zeros((1, 16), device=robot.device)
                 else:
                     action_np = session.run(["actions"], {"obs": observation.cpu().numpy()})[0]
                     action = torch.from_numpy(action_np).to(robot.device)
+                    if args.navigate_to_target and args.override_navigation_wheels:
+                        if target_reached and target_reached_step is not None:
+                            action[:, :12] = 0.0
+                            action = override_navigation_wheels(action, braking_command(robot))
+                        else:
+                            action = override_navigation_wheels(action, command)
                 robot.set_joint_position_target(default_pose + action[:, :12] * leg_scale, joint_ids=leg_ids)
                 robot.set_joint_velocity_target(action[:, 12:] * 5.0, joint_ids=wheel_ids)
                 last_action = action
@@ -322,11 +457,19 @@ def main() -> None:
                 state = torch.cat((robot.data.root_pos_w[0], robot.data.root_quat_w[0], robot.data.root_lin_vel_w[0], robot.data.root_ang_vel_w[0], robot.data.joint_pos[0], robot.data.joint_vel[0])).cpu().numpy().astype(np.float32)
                 front_ds[step], rear_ds[step], lidar_ds[step] = rgb(front), rgb(rear), scan(lidar)
                 proprio_ds[step], state_ds[step], action_ds[step] = observation[0].cpu().numpy(), state, action[0].cpu().numpy()
+                command_ds[step] = np.asarray(command, dtype=np.float32)
+                current_xy = robot.data.root_pos_w[0, :2]
+                path_length += float(torch.linalg.vector_norm(current_xy - previous_xy).item())
+                previous_xy = current_xy.clone()
                 height = float(robot.data.root_pos_w[0, 2].item())
                 min_height, max_height = min(min_height, height), max(max_height, height)
                 if TARGET_RGB is not None:
                     target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
-                    target_reached = target_reached or bool(torch.linalg.vector_norm(target_delta).item() <= 0.8)
+                    target_distance = float(torch.linalg.vector_norm(target_delta).item())
+                    min_target_distance = min(min_target_distance, target_distance)
+                    if target_distance <= 0.8 and not target_reached:
+                        target_reached = True
+                        target_reached_step = step
                 gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
                 terminated = int(height < 0.45 or gravity_z > -0.5)
                 done_ds[step] = terminated
@@ -336,7 +479,16 @@ def main() -> None:
                 yaw_delta = float(np.arctan2(np.sin(current_yaw - start_yaw), np.cos(current_yaw - start_yaw)))
             displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
             stable = terminated_steps == 0 and min_height >= 0.45
-            if abs(args.command_x) >= 0.05:
+            final_target_distance = (
+                float(torch.linalg.vector_norm(
+                    robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
+                ).item())
+                if TARGET_RGB is not None else None
+            )
+            final_planar_speed = float(torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item())
+            if args.navigate_to_target:
+                command_ok = target_reached and final_target_distance is not None and final_target_distance <= 0.9 and final_planar_speed < 0.15
+            elif abs(args.command_x) >= 0.05:
                 command_ok = args.command_x * displacement > 0.5
             elif abs(args.command_yaw) >= 0.05:
                 command_ok = args.command_yaw * yaw_delta > 0.25 and abs(displacement) < 2.0
@@ -350,11 +502,25 @@ def main() -> None:
             h5.attrs["terminated_steps"] = terminated_steps
             h5.attrs["command_ok"] = command_ok
             h5.attrs["target_reached"] = target_reached
+            h5.attrs["target_reached_step"] = -1 if target_reached_step is None else target_reached_step
+            h5.attrs["min_target_distance"] = min_target_distance if TARGET_RGB is not None else -1.0
+            h5.attrs["final_target_distance"] = -1.0 if final_target_distance is None else final_target_distance
+            h5.attrs["final_planar_speed"] = final_planar_speed
+            h5.attrs["path_length"] = path_length
             h5.attrs["success"] = success
         video.release()
         displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
         stable = terminated_steps == 0 and min_height >= 0.45
-        if abs(args.command_x) >= 0.05:
+        final_target_distance = (
+            float(torch.linalg.vector_norm(
+                robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
+            ).item())
+            if TARGET_RGB is not None else None
+        )
+        final_planar_speed = float(torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item())
+        if args.navigate_to_target:
+            command_ok = target_reached and final_target_distance is not None and final_target_distance <= 0.9 and final_planar_speed < 0.15
+        elif abs(args.command_x) >= 0.05:
             command_ok = args.command_x * displacement > 0.5
         elif abs(args.command_yaw) >= 0.05:
             command_ok = args.command_yaw * yaw_delta > 0.25 and abs(displacement) < 2.0
@@ -362,9 +528,11 @@ def main() -> None:
             command_ok = True
         success = bool(stable and command_ok and target_reached)
         print(
-            f"[M20PRO-NATIVE-EXPERT] episode={episode} x_displacement={displacement:.4f} m yaw_delta={yaw_delta:.4f} rad "
+            f"[M20PRO-NATIVE-EXPERT] episode={episode_id} x_displacement={displacement:.4f} m yaw_delta={yaw_delta:.4f} rad "
             f"min_root_height={min_height:.4f} m terminated_steps={terminated_steps} command_ok={command_ok} "
-            f"target_reached={target_reached} success={success} data={path} video={video_path}",
+            f"target_reached={target_reached} final_target_distance={final_target_distance} "
+            f"reached_step={target_reached_step} path_length={path_length:.4f} m success={success} "
+            f"data={path} video={video_path}",
             flush=True,
         )
     scene.reset()
