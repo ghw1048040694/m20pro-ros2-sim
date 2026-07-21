@@ -13,5 +13,8 @@ conda activate "${M20PRO_VLA_ENV}"
 export OMNI_KIT_CACHE_PATH="${M20PRO_SIM_WS}/.isaac-cache/kit"
 export OV_CACHE_ROOT="${M20PRO_SIM_WS}/.isaac-cache/ov"
 
+# Training logs/checkpoints/videos live on the mounted 2 TB disk via workspace symlinks.
+export M20PRO_OUTPUT_ROOT="${M20PRO_SIM_WS}/logs"
+
 unset _M20PRO_VLA_SCRIPT_DIR
 echo "Activated ${M20PRO_VLA_ENV} (Isaac Lab: ${ISAACLAB_PATH})"

@@ -16,6 +16,20 @@ Use `false` as the first argument to start without RViz:
 
 ## VLA / Isaac Lab environment
 
+Training outputs are stored on the mounted 2 TB disk. Repair the workspace
+links after a reboot if needed:
+
+```bash
+./scripts/prepare_output_storage.sh
+```
+
+The current disk is `/dev/sdb2` (UUID
+`b9cbb43d-5119-4328-99d9-10f7c0d91e37`). Mount it with:
+
+```bash
+udisksctl mount -b /dev/disk/by-uuid/b9cbb43d-5119-4328-99d9-10f7c0d91e37
+```
+
 The embodied-learning environment is isolated in the `m20pro-vla` Conda
 environment. It uses Python 3.11, Isaac Sim 5.1, Isaac Lab 2.3.2, PyTorch
 2.7/CUDA 12.8, and RSL-RL.

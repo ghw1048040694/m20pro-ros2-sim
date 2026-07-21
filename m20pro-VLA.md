@@ -10,6 +10,13 @@ Last updated: 2026-07-21 CST
 - 目标是语言条件下的开放词汇导航：指定地点、指定物体、自主探索，并在需要时跨越 1 m 障碍。
 - 长期方向是 VLA（vision-language-action）策略，不把 Nav2/A*/AMCL 作为主要决策器。
 
+## 训练存储
+
+- 系统盘为 `/dev/sda3`，可用约 60 GB；Isaac Sim/环境本体仍留在系统盘。
+- 2 TB 硬盘为 `/dev/sdb2`，UUID `b9cbb43d-5119-4328-99d9-10f7c0d91e37`，当前挂载于 `/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37`，剩余约 715 GB。
+- 训练输出根目录：`/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA`。工作区中 `logs` 和 `videos` 是指向该目录的软链接，旧训练产物已迁移，没有再占用系统盘。
+- 重启后先运行 `./scripts/prepare_output_storage.sh`；如未挂载，运行 `udisksctl mount -b /dev/disk/by-uuid/b9cbb43d-5119-4328-99d9-10f7c0d91e37`。
+
 ## 技术基线
 
 - Conda：`m20pro-vla`
