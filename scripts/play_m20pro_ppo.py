@@ -36,21 +36,30 @@ try:
     runner.load(args.checkpoint)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
     observations = env.get_observations()
-    start_x = env.unwrapped.robot.data.root_pos_w[:, 0].clone()
     min_height = env.unwrapped.robot.data.root_pos_w[:, 2].clone()
-    falls = torch.zeros(args.num_envs, dtype=torch.int32, device=env.unwrapped.device)
+    done_count = torch.zeros(args.num_envs, dtype=torch.int32, device=env.unwrapped.device)
+    integrated_x = torch.zeros(args.num_envs, device=env.unwrapped.device)
+    action_magnitude = torch.zeros(args.num_envs, device=env.unwrapped.device)
+    step_dt = env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation
     for _ in range(args.steps):
         with torch.inference_mode():
             actions = policy(observations)
         observations, _, dones, _ = env.step(actions)
         root_pos = env.unwrapped.robot.data.root_pos_w
+        forward_velocity = env.unwrapped.robot.data.root_lin_vel_b[:, 0]
         min_height = torch.minimum(min_height, root_pos[:, 2])
-        falls += (root_pos[:, 2] < env.unwrapped.cfg.termination_height).to(torch.int32)
-    displacement = env.unwrapped.robot.data.root_pos_w[:, 0] - start_x
-    print(f"[M20PRO-PLAY] checkpoint={args.checkpoint}")
-    print(f"[M20PRO-PLAY] mean_x_displacement={displacement.mean().item():.4f} m")
-    print(f"[M20PRO-PLAY] min_root_height={min_height.min().item():.4f} m")
-    print(f"[M20PRO-PLAY] terminated_steps={int(falls.sum())}")
+        done_count += dones.to(torch.int32)
+        integrated_x += forward_velocity * step_dt
+        action_magnitude += torch.mean(torch.abs(actions), dim=-1)
+    print(f"[M20PRO-PLAY] checkpoint={args.checkpoint}", flush=True)
+    print(f"[M20PRO-PLAY] integrated_forward_distance={integrated_x.mean().item():.4f} m", flush=True)
+    print(
+        f"[M20PRO-PLAY] mean_forward_velocity={(integrated_x / (args.steps * step_dt)).mean().item():.4f} m/s",
+        flush=True,
+    )
+    print(f"[M20PRO-PLAY] min_root_height={min_height.min().item():.4f} m", flush=True)
+    print(f"[M20PRO-PLAY] done_count={int(done_count.sum())}", flush=True)
+    print(f"[M20PRO-PLAY] mean_abs_action={(action_magnitude / args.steps).mean().item():.4f}", flush=True)
 finally:
     if env is not None:
         env.close()
