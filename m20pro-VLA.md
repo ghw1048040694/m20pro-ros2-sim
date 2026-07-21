@@ -91,6 +91,7 @@ Last updated: 2026-07-21 CST
 - jump v4 重训仍然没有学到时序：200 步回放最低高度 `0.4178 m`、`done_count=32`，但开环探针已证明 PD 目标姿态可以跳。
 - 已加入 jump v5 reference bootstrap 奖励：phase 前 30% 学习收腿目标，中间阶段学习伸腿目标，同时保留高度、上向速度和腾空奖励。这是用已验证的开环序列帮助 PPO 先学会可行跳跃时序，后续再降低 reference 权重。
 - 已记录 PPO 指标含义：`Loss/value_function` 是 critic 价值回归误差，`Loss/surrogate` 是 PPO 裁剪策略损失，`Policy/mean_noise_std` 是 actor 输出动作分布的平均探索标准差。
+- `jump_env.py` 中 reference 项权重为 `8.0` 的改动作为 jump v5 实验保留并单独提交；本轮公开专家/模仿学习主路线不依赖该奖励，也不再以它继续盲调 PPO。
 
 ### 公开专家与模仿学习切换（2026-07-21）
 

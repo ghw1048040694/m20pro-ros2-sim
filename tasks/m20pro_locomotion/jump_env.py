@@ -52,7 +52,7 @@ class M20ProJumpEnv(M20ProLocomotionEnv):
             + 2.0 * flight_phase * height_tracking
             + 8.0 * takeoff_phase * progress_reward
             + 0.5 * upright
-            + 2.0 * torch.exp(-reference_error / 0.25)
+            + 8.0 * (1.0 - reference_error)
             - 0.02 * leg_posture_cost
             - 0.005 * leg_action_cost
         )
