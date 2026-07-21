@@ -93,6 +93,8 @@ TERM=xterm python scripts/check_m20pro_task.py --headless
 
 `isaaclab.sh` 运行时需要 `TERM=xterm`，以避免 `TERM=dumb` 下 `tabs` 命令失败。
 
+回放命令默认应包含 `--video` 和独立 `--video-dir`，以 headless rendering 生成 MP4；不再只给无视频的回放命令。
+
 ## PPO / TensorBoard 指标词典
 
 ### 当前 locomotion 奖励函数
