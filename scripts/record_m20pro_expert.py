@@ -240,7 +240,7 @@ def main() -> None:
             h5.attrs["expert"] = f"open_loop_pd_{args.pattern}"
             for step in range(args.steps):
                 action, phase = expert_action(step, args.steps, robot.device)
-                leg_targets = torch.clamp(action * 0.8, -0.8, 0.8)
+                leg_targets = torch.clamp(action * 2.2, -2.2, 2.2)
                 robot.set_joint_position_target(leg_targets, joint_ids=leg_ids)
                 robot.set_joint_position_target(default_wheel_targets, joint_ids=wheel_ids)
                 for _ in range(args.decimation):

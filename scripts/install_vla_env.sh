@@ -61,7 +61,7 @@ done
 "${ENV_PYTHON}" -m pip install -e "${ISAACLAB_DIR}/source/isaaclab_tasks"
 "${ENV_PYTHON}" -m pip install -e "${ISAACLAB_DIR}/source/isaaclab_rl[rsl_rl]"
 "${ENV_PYTHON}" -m pip install \
-  "onnx==1.18.0" "packaging==23.0" "psutil==5.9.8" \
+  "onnx==1.18.0" "onnxruntime==1.27.0" "packaging==23.0" "psutil==5.9.8" \
   "starlette==0.45.3" "typing_extensions==4.12.2"
 
 # Isaac Lab 2.3.2 declares starlette 0.49.1 while Isaac Sim 5.1's pinned

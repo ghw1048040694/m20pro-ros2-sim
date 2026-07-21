@@ -20,3 +20,6 @@ class M20ProJumpEnvCfg(M20ProLocomotionEnvCfg):
     initial_base_height = 0.62
     target_jump_height = 0.80
     squat_base_height = 0.50
+    # Expert-data bootstrap range.  This is a joint-target limit, not a
+    # reward term; it remains below the URDF hipy/knee limits.
+    leg_target_limit = 2.2

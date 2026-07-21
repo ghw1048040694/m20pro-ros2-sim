@@ -122,7 +122,20 @@ Last updated: 2026-07-22 CST
 - [Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T)：embodiment/action schema 参考；本机不做 N1.7 全量微调。
 - [Unitree RL Gym](https://github.com/unitreerobotics/unitree_rl_gym)：公开四足 RL 训练/部署参考，后续用于动作语义核对。
 
-下一阶段先做 Go2→M20 重定向视频校准；确认腿顺序、符号和站立姿态后，再把 M20 的前后相机、LiDAR、语言任务标签合并进 LeRobot-compatible 数据集，最后训练小型 BC/ACT 基线。
+此前的 Go2→M20 重定向路线已冻结为失败对照；当前优先使用原生 M20 专家采集同构数据，再把前后相机、LiDAR、语言任务标签合并进 LeRobot-compatible 数据集，最后训练小型 BC/ACT 基线。
+
+### 原生 M20 专家协议与首次有效回放（2026-07-22）
+
+- 在 GitHub 仓库 [AI-DA-STC/M20-autonomy-sim](https://github.com/AI-DA-STC/M20-autonomy-sim) 中找到原生 M20 `policy.onnx`。模型输入为 `obs[1,57]`，输出为 `actions[1,16]`；当前 Conda 环境已安装 `onnxruntime==1.27.0`，CPU 推理足够支撑单环境 50 Hz。
+- 官方观测顺序为 `base_omega*0.25(3) + projected_gravity(3) + command(3) + joint_pos-default(16) + joint_vel*0.05(16) + last_action(16)`。动作顺序是 12 个腿关节后接 4 个轮关节，腿缩放 `[0.125,0.25,0.25]`、轮速度缩放 `5.0`，PD 为腿 `Kp=80/Kd=2`、轮 `Kd=0.6`。
+- 官方 M20 的后腿髋/膝姿态必须镜像：默认策略姿态为 `FL/FR=[0,-0.6,1.0]`、`HL/HR=[0,0.6,-1.0]`。此前开环 jump 和 Go2 重定向把后腿符号处理错，导致“平移、僵硬、倒地”的错误现象；新适配器严格按官方 policy order 和 USD joint order 验证。
+- 原生 rolling 回放（第三人称 MP4）结果：`500` 个策略步、命令 `[0.5,0,0]`，`x_displacement=14.7179 m`，`mean_forward_speed=0.3684 m/s`，`min_root_height=0.5154 m`，`max_root_height=0.5295 m`，`terminated_steps=0`。这证明 M20 USD、轮执行器和关节协议已经能产生持续滚动；腿保持支撑姿态是该 rolling policy 的预期行为，不应再把“腿不摆”当作平地轮式专家失败。
+- 近景复核视频：`videos/public_m20_native_close_v1/m20-native-x+0.50-y+0.00-yaw+0.00-step-0.mp4`，250 步得到 `x_displacement=7.3376 m`、`mean_forward_speed=0.3678 m/s`、`min_root_height=0.5154 m`、`terminated_steps=0`。
+- 新增 [play_public_m20_policy.py](scripts/play_public_m20_policy.py) / `play_public_m20_policy.sh`，每次回放强制带 `--video`；新增 [record_public_m20_expert.py](scripts/record_public_m20_expert.py) / `record_public_m20_expert.sh`，记录前后 RGB、72 线 360° LiDAR、57 维原生 proprio、45 维全状态、16 维动作、command 和自然语言标签。
+- 采集器 5 步 smoke 已通过：HDF5 形状为 `front/rear=(5,96,160,3)`、`lidar=(5,72)`、`proprio=(5,57)`、`state=(5,45)`、`action=(5,16)`，`terminated_steps=0`，同步 MP4 正常写入。该 smoke 仅是格式验证，正式数据需使用完整 episode。
+- 上游仓库未发现可供重新分发的根目录 LICENSE 文件；本项目只在本机保留来源说明和个人研究验证，不把外部源码或权重提交到仿真仓库或 VLA-Learning 仓库。
+
+当前判断：原生 M20 policy 已经是合格的 rolling 专家，但它没有跳跃能力，也没有语言、相机和 LiDAR 决策能力。因此“自然语言找物体/导航 + 1 m 障碍跳跃”仍未完成；下一步先采集多命令 rolling 正样本，再加入可物理验证的 jump skill，最后训练小型语言条件 action-chunk BC/VLA，而不是继续盲目增加 PPO 迭代。
 
 ## 常用验证
 
@@ -162,6 +175,25 @@ M20 第三人称重定向回放（自动录制视频）：
   --actions-h5 /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_go2_rough_v0/m20_retarget_v0.h5 \
   --steps 200 \
   --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_retargeted_v0
+```
+
+原生 M20 专家回放（自动包含近景第三人称视频）：
+
+```bash
+./scripts/play_public_m20_policy.sh \
+  --steps 500 --warmup-steps 75 \
+  --command-x 0.5 --command-y 0.0 --command-yaw 0.0 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_m20_native_v1
+```
+
+采集原生 M20 rolling 正样本（每个 episode 自动写 HDF5 和 MP4）：
+
+```bash
+./scripts/record_public_m20_expert.sh \
+  --episodes 4 --steps 500 --warmup-steps 75 \
+  --task-text "向前走" --command-x 0.5 \
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_m20_native_v1 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_m20_native_v1
 ```
 
 ## PPO / TensorBoard 指标词典
@@ -215,8 +247,8 @@ Actor 输出的动作高斯分布的平均标准差。策略从 `Normal(mean_act
 
 ## 待办路线
 
-1. 在 M20 上回放 `m20_retarget_v0.h5`，校准 Go2→M20 的腿顺序、符号、站立偏置和目标范围；先只验证视频和根高度，不训练 VLA。
-2. 采集通过校准的 M20 rolling/jump 专家轨迹，统一保存前后 RGB、72 线 LiDAR、45 维状态、12/4 维动作和自然语言任务标签。
+1. 用 `record_public_m20_expert.sh` 采集多命令 rolling 正样本，统一保存前后 RGB、72 线 LiDAR、57 维原生 proprio、45 维状态、16 维动作和自然语言任务标签。
+2. 继续寻找/构造可物理验证的 M20 jump expert；未通过 `min_root_height`、高度和视频检查的跳跃数据不得进入成功专家集合。
 3. 转换为 LeRobot-compatible 数据集，训练小型 BC/ACT action-chunk 基线，再加入语言和视觉条件。
 4. 加入随机障碍和 1 m 越障任务，训练 VLA 高层技能选择（rolling/jump），而不是让单一 PPO 直接探索跳跃时序。
 5. 加入开放词汇物体搜索、地图/无地图切换和语言任务评测。

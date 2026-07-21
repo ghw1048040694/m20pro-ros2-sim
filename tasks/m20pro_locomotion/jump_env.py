@@ -16,7 +16,8 @@ class M20ProJumpEnv(M20ProLocomotionEnv):
 
     def _apply_action(self):
         # Actions are normalized leg joint targets; wheels remain position-locked.
-        leg_targets = torch.clamp(self.actions * 0.8, min=-0.8, max=0.8)
+        leg_limit = float(getattr(self.cfg, "leg_target_limit", 0.8))
+        leg_targets = torch.clamp(self.actions * leg_limit, min=-leg_limit, max=leg_limit)
         self.robot.set_joint_position_target(leg_targets, joint_ids=self._leg_ids)
         wheel_targets = self.robot.data.default_joint_pos[:, self._wheel_ids]
         self.robot.set_joint_position_target(wheel_targets, joint_ids=self._wheel_ids)

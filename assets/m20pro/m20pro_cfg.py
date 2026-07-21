@@ -58,12 +58,13 @@ M20PRO_CFG = ArticulationCfg(
 
 M20PRO_JUMP_CFG = M20PRO_CFG.replace(
     actuators={
-        "legs": ImplicitActuatorCfg(
+        "legs": DCMotorCfg(
             joint_names_expr=[".*_(hipx|hipy|knee)_joint"],
             stiffness=80.0,
-            damping=8.0,
-            effort_limit_sim=76.4,
-            velocity_limit_sim=22.4,
+            damping=4.0,
+            effort_limit=76.4,
+            saturation_effort=76.4,
+            velocity_limit=22.4,
         ),
         "wheels_locked": ImplicitActuatorCfg(
             joint_names_expr=[".*_wheel_joint"],
