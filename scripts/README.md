@@ -57,3 +57,9 @@ Record a trained policy without opening the Isaac Sim GUI:
   --num-envs 1 --steps 400 --video \
   --video-dir videos/m20pro_locomotion_v2
 ```
+
+Smoke-test the leg-only jump skill:
+
+```bash
+./scripts/smoke_m20pro_jump.sh --num-envs 4 --steps 24
+```
