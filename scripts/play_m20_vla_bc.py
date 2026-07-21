@@ -15,8 +15,8 @@ from isaaclab.app import AppLauncher
 
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
-DEFAULT_CHECKPOINT = DATA_ROOT / "checkpoints/m20_vla_bc_v1/best.pt"
-DEFAULT_VIDEO_ROOT = Path(os.environ.get("M20PRO_OUTPUT_ROOT", str(DATA_ROOT))) / "videos/m20_vla_bc_v1"
+DEFAULT_CHECKPOINT = DATA_ROOT / "checkpoints/m20_vla_bc_v4/best.pt"
+DEFAULT_VIDEO_ROOT = Path(os.environ.get("M20PRO_OUTPUT_ROOT", str(DATA_ROOT))) / "videos/m20_vla_bc_v4"
 COMMAND_ALIASES = {
     "向前走": (0.5, 0.0, 0.0),
     "前进": (0.5, 0.0, 0.0),
@@ -24,6 +24,11 @@ COMMAND_ALIASES = {
     "后退": (-0.5, 0.0, 0.0),
     "向左转": (0.0, 0.0, 0.5),
     "左转": (0.0, 0.0, 0.5),
+}
+TARGET_COLORS = {
+    "red": (0.9, 0.05, 0.03),
+    "blue": (0.03, 0.15, 0.95),
+    "green": (0.04, 0.8, 0.08),
 }
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -36,6 +41,9 @@ parser.add_argument("--steps", type=int, default=250)
 parser.add_argument("--warmup-steps", type=int, default=75)
 parser.add_argument("--chunk-execution", type=int, default=4, help="How many consecutive control steps to execute from each predicted chunk.")
 parser.add_argument("--wheel-damping", type=float, default=None)
+parser.add_argument("--target-color", choices=["none", "red", "blue", "green"], default="none")
+parser.add_argument("--target-x", type=float, default=3.0)
+parser.add_argument("--target-y", type=float, default=0.0)
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_ROOT)
 parser.add_argument("--metrics", type=Path, default=None, help="Optional JSON metrics path.")
 parser.add_argument("--video", action="store_true", help="Required: record an inspectable third-person MP4.")
@@ -113,6 +121,18 @@ class VLAReplaySceneCfg(InteractiveSceneCfg):
                                  velocity_limit=79.3, stiffness=0.0, damping=WHEEL_DAMPING),
         },
     ).replace(prim_path="{ENV_REGEX_NS}/Robot")
+    target = (
+        AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Target",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.42, 0.42, 0.84),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=TARGET_COLORS[args.target_color]),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(args.target_x, args.target_y, 0.42)),
+        )
+        if args.target_color != "none" else None
+    )
     front_camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link/front_camera", update_period=0.02, height=96, width=160,
         data_types=["rgb"],
@@ -149,10 +169,16 @@ def encode_text(text: str, max_length: int = 32) -> torch.Tensor:
     return torch.from_numpy(tokens)
 
 
-def make_proprio(robot: Articulation, joint_ids: list[int], last_action: torch.Tensor) -> torch.Tensor:
+def make_proprio(
+    robot: Articulation, joint_ids: list[int], last_action: torch.Tensor, mask_privileged_command: bool
+) -> torch.Tensor:
     gravity = torch.tensor([[0.0, 0.0, -1.0]], device=robot.device)
     projected_gravity = quat_apply_inverse(robot.data.root_quat_w, gravity)
-    command = torch.tensor([[args.command_x, args.command_y, args.command_yaw]], device=robot.device)
+    command = (
+        torch.zeros((1, 3), device=robot.device)
+        if mask_privileged_command
+        else torch.tensor([[args.command_x, args.command_y, args.command_yaw]], device=robot.device)
+    )
     joint_pos = robot.data.joint_pos[:, joint_ids].clone()
     joint_pos[:, 12:] = 0.0
     joint_pos -= DEFAULT_POSE.to(robot.device)
@@ -188,7 +214,10 @@ def reset_scene(scene: InteractiveScene) -> None:
 def main() -> None:
     payload = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     horizon = int(payload["horizon"])
-    model = M20VLAActionChunk(horizon)
+    checkpoint_config = payload.get("config", {})
+    architecture = checkpoint_config.get("architecture", "global_v1")
+    mask_privileged_command = bool(checkpoint_config.get("proprio_command_mask"))
+    model = M20VLAActionChunk(horizon, architecture=architecture)
     model.load_state_dict(payload["model_state_dict"])
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
     model.to(device).eval()
@@ -223,6 +252,12 @@ def main() -> None:
     forward_speed_sum = 0.0
     action_sum = 0.0
     terminated_steps = 0
+    target_reached = args.target_color == "none"
+    target_reached_step = None
+    min_target_distance = float("inf")
+    post_reach_speed_sum = 0.0
+    post_reach_steps = 0
+    final_planar_speed = 0.0
     video_path = args.video_dir / f"bc-{args.task_text}-step-0.mp4"
     video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
     if not video.isOpened():
@@ -231,9 +266,9 @@ def main() -> None:
     cached_chunk = None
     cached_index = 0
     try:
-        for _ in range(args.steps):
+        for step in range(args.steps):
             if cached_chunk is None or cached_index >= min(args.chunk_execution, horizon):
-                proprio = make_proprio(robot, joint_ids, last_action)
+                proprio = make_proprio(robot, joint_ids, last_action, mask_privileged_command)
                 front_image = rgb_small(front)
                 rear_image = rgb_small(rear)
                 rgb = torch.cat((front_image, rear_image), dim=-1).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).to(device)
@@ -258,6 +293,17 @@ def main() -> None:
             min_height, max_height = min(min_height, height), max(max_height, height)
             forward_speed_sum += float(robot.data.root_lin_vel_b[0, 0].item())
             action_sum += float(action.abs().mean().item())
+            final_planar_speed = float(torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item())
+            if args.target_color != "none":
+                target_xy = torch.tensor([args.target_x, args.target_y], device=robot.device)
+                target_distance = float(torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy).item())
+                min_target_distance = min(min_target_distance, target_distance)
+                if not target_reached and target_distance <= 0.8:
+                    target_reached = True
+                    target_reached_step = step
+                if target_reached:
+                    post_reach_speed_sum += final_planar_speed
+                    post_reach_steps += 1
             gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
             terminated_steps += int(height < 0.45 or gravity_z > -0.5)
             quat = robot.data.root_quat_w[0].detach().cpu().numpy()
@@ -266,11 +312,25 @@ def main() -> None:
     finally:
         video.release()
     displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
+    final_target_distance = (
+        float(torch.linalg.vector_norm(
+            robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
+        ).item())
+        if args.target_color != "none" else None
+    )
+    post_reach_mean_speed = post_reach_speed_sum / post_reach_steps if post_reach_steps else None
+    stable = terminated_steps == 0 and min_height >= 0.45
+    stopped_after_reach = bool(post_reach_mean_speed is not None and post_reach_mean_speed < 0.15)
+    success = stable and (args.target_color == "none" or (target_reached and stopped_after_reach))
     metrics_path = args.metrics or args.video_dir / f"bc-{args.task_text}-step-0.json"
     metrics = {
         "checkpoint": str(args.checkpoint),
+        "architecture": architecture,
         "task_text": args.task_text,
         "command": [args.command_x, args.command_y, args.command_yaw],
+        "privileged_command_used_by_model": not mask_privileged_command,
+        "target_color": args.target_color,
+        "target_xy": [args.target_x, args.target_y] if args.target_color != "none" else None,
         "steps": args.steps,
         "chunk_execution": args.chunk_execution,
         "x_displacement": displacement,
@@ -280,6 +340,14 @@ def main() -> None:
         "max_root_height": max_height,
         "terminated_steps": terminated_steps,
         "mean_abs_action": action_sum / args.steps,
+        "target_reached": target_reached,
+        "target_reached_step": target_reached_step,
+        "min_target_distance": None if args.target_color == "none" else min_target_distance,
+        "final_target_distance": final_target_distance,
+        "post_reach_mean_speed": post_reach_mean_speed,
+        "final_planar_speed": final_planar_speed,
+        "stopped_after_reach": stopped_after_reach,
+        "success": success,
         "wheel_damping": WHEEL_DAMPING,
         "video": str(video_path),
     }
@@ -292,6 +360,15 @@ def main() -> None:
     print(f"[M20PRO-VLA-PLAY] mean_forward_speed={forward_speed_sum / args.steps:.4f} m/s")
     print(f"[M20PRO-VLA-PLAY] min_root_height={min_height:.4f} m max_root_height={max_height:.4f} m")
     print(f"[M20PRO-VLA-PLAY] terminated_steps={terminated_steps} mean_abs_action={action_sum / args.steps:.4f}")
+    if args.target_color != "none":
+        print(
+            f"[M20PRO-VLA-PLAY] target_reached={target_reached} reached_step={target_reached_step} "
+            f"min_distance={min_target_distance:.4f} m final_distance={final_target_distance:.4f} m"
+        )
+        print(
+            f"[M20PRO-VLA-PLAY] post_reach_mean_speed={post_reach_mean_speed} "
+            f"final_planar_speed={final_planar_speed:.4f} m/s stopped={stopped_after_reach} success={success}"
+        )
     print(f"[M20PRO-VLA-PLAY] video={video_path}")
     print(f"[M20PRO-VLA-PLAY] metrics={metrics_path}")
     scene.reset()

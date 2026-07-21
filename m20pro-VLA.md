@@ -148,6 +148,21 @@ Last updated: 2026-07-22 CST
 - 闭环 forward chunk4 250 步结果：`x_displacement=7.3347 m`、`mean_forward_speed=0.3676 m/s`、`yaw_delta=0.026 rad`、`min_root_height=0.5152 m`、`terminated_steps=0`。50 步 backward 结果为 `x=-1.2321 m`、平均 `-0.3112 m/s`、`terminated_steps=0`；50 步 turn 结果为 `yaw_delta=0.114 rad`、`x=0.4440 m`、`min_root_height=0.5179 m`、`terminated_steps=0`。
 - 当前 VLA 只学会语言条件下的 rolling/backward/turn 低层动作，语言标签仍是运动指令；它尚未学习“寻找某物体”、地图/无地图探索或 jump skill，不能把 v1 宣称为完整任务完成。
 
+### 视觉目标到达 VLA/BC v2-v4（2026-07-22）
+
+- `record_public_m20_expert.py` 已支持红/蓝/绿非碰撞方块、目标坐标、语言标签和 `--stop-on-target`。模拟器目标真值只用于生成专家停车标签和计算验收指标；VLA 回放控制器不读取目标坐标或成功半径，控制输入仍是前后 RGB、LiDAR、proprio 和语言。
+- 修正了一处关键的 VLA 输入泄漏：原生 57 维 proprio 的 `6:9` 是专家速度 command，训练和回放现均将这三维清零。模型必须从语言和视觉推断任务，不再直接复制专家 command。
+- 训练拆分改为按语言分组；只有重复语言才留出验证 episode，单条颜色数据不会被错误分到纯验证集。训练窗口使用 `WeightedRandomSampler` 按任务文本均衡采样，避免四条长 forward 数据淹没颜色目标样本。
+- v2 使用固定帧数停车，红色闭环通过，但蓝/绿仍穿过目标。数据复核确认固定 `stop_after` 发生时目标已经离开前相机，因此标签与视觉时序不一致。
+- v3 改为专家首次进入 `0.8 m` 目标半径后立刻输出全零动作；红色通过，但旧图像编码器的全局平均池化会抹掉目标位置和尺度，蓝色仍失败。该失败没有靠继续堆 epoch 掩盖。
+- v4 新增 `spatial_v2` 图像编码：保留 `3x5` 空间网格并投影到 128 维，同时继续兼容旧 `global_v1` checkpoint。训练使用 9 条成功 episode、`1206` 个训练窗口和 `247` 个验证窗口，80 epochs 最终训练损失 `0.002181`，最佳 forward 验证损失 `1.03e-4`。
+- v4 checkpoint：`/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v4/best.pt`。
+- 红色目标闭环：`x=1.3046 m`、最小目标距离 `0.6575 m`、到达后平均速度 `0.0280 m/s`、最终平面速度 `0.0010 m/s`、`terminated_steps=0`、`success=true`。
+- 蓝色目标闭环：`x=2.3656 m`、最小目标距离 `0.6779 m`、到达后平均速度 `0.0317 m/s`、最终平面速度 `0.0013 m/s`、`terminated_steps=0`、`success=true`。
+- 绿色目标闭环：`x=2.0100 m`、最小目标距离 `0.7086 m`、到达后平均速度 `0.0287 m/s`、最终平面速度 `0.0026 m/s`、`terminated_steps=0`、`success=true`。
+- 普通“向前走”回归测试仍通过：250 步位移 `7.3197 m`、平均速度 `0.3669 m/s`、最低根高 `0.5152 m`、`terminated_steps=0`。空间视觉能力没有破坏原生 rolling 动作质量。
+- 对应 MP4 和 JSON 位于 `videos/m20_vla_bc_v4/{red,blue,green,forward}/` 与 `logs/m20_vla_bc_v4_*.json`。这只是固定场景下的“看到指定颜色目标并停车”里程碑；尚未覆盖随机目标位置、主动转向搜索、开放词汇、地图/无地图探索、障碍物和跳跃，不能宣称完整任务已完成。
+
 ### Jump 专家搜索边界（2026-07-22）
 
 - GitHub/API 搜索了 M20/DeepRobotics/wheel-legged parkour 公开仓库，没有找到可复用的 M20 jump checkpoint；保留的原生 M20公开专家只有 rolling `policy.onnx`。
@@ -209,22 +224,26 @@ M20 第三人称重定向回放（自动录制视频）：
   --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_m20_native_v1
 ```
 
-训练语言条件多模态 action-chunk VLA/BC：
+训练带空间视觉编码的语言条件 action-chunk VLA/BC：
 
 ```bash
 ./scripts/train_m20_vla_bc.sh \
-  --epochs 40 --batch-size 64 --horizon 8 --stride 2 \
+  --architecture spatial_v2 \
+  --epochs 80 --batch-size 64 --horizon 8 --stride 2 \
   --device cuda:0 \
-  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v1
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v4
 ```
 
-VLA 闭环回放（自动写视频和 JSON 指标）：
+VLA 红色目标闭环回放（wrapper 自动带 `--headless --video`，并写 MP4/JSON）：
 
 ```bash
 ./scripts/play_m20_vla_bc.sh \
-  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v1/best.pt \
-  --task-text "向前走" --steps 250 --chunk-execution 4 \
-  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_bc_forward_250
+  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v4/best.pt \
+  --task-text "到红色方块去" \
+  --target-color red --target-x 2.0 --target-y 0.0 \
+  --steps 160 --chunk-execution 4 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_bc_v4/red \
+  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_bc_v4_red.json
 ```
 
 采集原生 M20 rolling 正样本（每个 episode 自动写 HDF5 和 MP4）：
@@ -288,7 +307,7 @@ Actor 输出的动作高斯分布的平均标准差。策略从 `Normal(mean_act
 
 ## 待办路线
 
-1. 扩充成功的 forward/backward/turn 专家，并加入停止、侧移等语言指令；诊断失败样本继续隔离。
+1. 为颜色目标增加随机距离、横向位置、相机视角和无目标负样本，再训练主动转向与视觉搜索，而不是只在固定直线路径上验收。
 2. 解决 jump skill 的物理能力问题：优先查找官方动作/仿真协议或调整 M20 USD/执行器，未通过高度、越障和视频检查不得进入 VLA 数据。
 3. 将 VLA 数据集扩展为 LeRobot-compatible episode/skill schema，加入 rolling/jump skill token 和 action chunk。
 4. 在具备成功 jump expert 后加入随机障碍、1 m 越障、地图/无地图和开放词汇物体搜索评测。

@@ -36,6 +36,11 @@ parser.add_argument("--warmup-steps", type=int, default=75)
 parser.add_argument("--command-x", type=float, default=0.5)
 parser.add_argument("--command-y", type=float, default=0.0)
 parser.add_argument("--command-yaw", type=float, default=0.0)
+parser.add_argument("--target-color", choices=["none", "red", "blue", "green"], default="none")
+parser.add_argument("--target-x", type=float, default=3.0)
+parser.add_argument("--target-y", type=float, default=0.0)
+parser.add_argument("--stop-after", type=int, default=None, help="Switch the expert command to zero after this control step.")
+parser.add_argument("--stop-on-target", action="store_true", help="Stop with zero action when the simulated target enters the success radius.")
 parser.add_argument("--wheel-damping", type=float, default=None, help="Isaac-only wheel Kd override; default adapts for yaw commands.")
 parser.add_argument("--task-text", default="向前走")
 parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT / "datasets/public_m20_native_v1")
@@ -53,6 +58,13 @@ if not args.policy.is_file():
     parser.error(f"M20 policy not found: {args.policy}")
 args.enable_cameras = True
 app = AppLauncher(args).app
+
+TARGET_COLORS = {
+    "red": (0.9, 0.05, 0.03),
+    "blue": (0.03, 0.15, 0.95),
+    "green": (0.04, 0.8, 0.08),
+}
+TARGET_RGB = TARGET_COLORS.get(args.target_color)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -116,6 +128,19 @@ class NativeM20SceneCfg(InteractiveSceneCfg):
         physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0, restitution=0.0),
     )
     robot = PUBLIC_M20_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    target = (
+        AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Target",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.42, 0.42, 0.84),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=TARGET_RGB),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(args.target_x, args.target_y, 0.42)),
+        )
+        if TARGET_RGB is not None
+        else None
+    )
     front_camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link/front_camera", update_period=0.02,
         height=args.image_height, width=args.image_width, data_types=["rgb"],
@@ -135,7 +160,10 @@ class NativeM20SceneCfg(InteractiveSceneCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.16)),
         pattern_cfg=patterns.LidarPatternCfg(channels=1, vertical_fov_range=(0.0, 0.0),
                                               horizontal_fov_range=(-180.0, 180.0), horizontal_res=5.0),
-        max_distance=20.0, mesh_prim_paths=["/World/ground"],
+        max_distance=20.0,
+        # Keep LiDAR on the ground mesh; the semantic target is camera-visible
+        # and intentionally non-colliding, so it is not a ray-cast surface.
+        mesh_prim_paths=["/World/ground"],
     )
     third_person = CameraCfg(
         prim_path="{ENV_REGEX_NS}/ThirdPerson", update_period=0.02, height=288, width=480, data_types=["rgb"],
@@ -145,15 +173,23 @@ class NativeM20SceneCfg(InteractiveSceneCfg):
     light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.8, 0.8, 0.8)))
 
 
-def native_observation(robot: Articulation, joint_ids: list[int], last_action: torch.Tensor) -> torch.Tensor:
+def native_observation(
+    robot: Articulation, joint_ids: list[int], last_action: torch.Tensor, command: tuple[float, float, float]
+) -> torch.Tensor:
     gravity = torch.tensor([[0.0, 0.0, -1.0]], device=robot.device)
     projected_gravity = quat_apply_inverse(robot.data.root_quat_w, gravity)
-    command = torch.tensor([[args.command_x, args.command_y, args.command_yaw]], device=robot.device)
+    command = torch.tensor([list(command)], device=robot.device)
     joint_pos = robot.data.joint_pos[:, joint_ids].clone()
     joint_pos[:, 12:] = 0.0
     joint_pos -= DEFAULT_POLICY_POSE.to(robot.device)
     joint_vel = robot.data.joint_vel[:, joint_ids] * 0.05
     return torch.cat([robot.data.root_ang_vel_b * 0.25, projected_gravity, command, joint_pos, joint_vel, last_action], dim=-1)
+
+
+def command_for_step(step: int) -> tuple[float, float, float]:
+    if args.stop_after is not None and step >= args.stop_after:
+        return (0.0, 0.0, 0.0)
+    return (args.command_x, args.command_y, args.command_yaw)
 
 
 def rgb(camera) -> np.ndarray:
@@ -199,12 +235,14 @@ def main() -> None:
     metadata = {
         "format": "m20pro_native_expert_hdf5_v1", "expert": "AI-DA-STC/M20-autonomy-sim policy.onnx",
         "policy_protocol": "57 observation -> 16 action; official M20PolicyRunner; no PPO reward",
-        "task_text": args.task_text, "command": [args.command_x, args.command_y, args.command_yaw], "wheel_damping": WHEEL_DAMPING,
+        "task_text": args.task_text, "command": [args.command_x, args.command_y, args.command_yaw],
+        "stop_after": args.stop_after, "stop_on_target": args.stop_on_target, "target_color": args.target_color,
+        "target_xy": [args.target_x, args.target_y], "wheel_damping": WHEEL_DAMPING,
         "control_hz": 50.0, "joint_names": POLICY_JOINT_NAMES,
         "observation": {"front_rgb": [args.image_height, args.image_width, 3], "rear_rgb": [args.image_height, args.image_width, 3],
                          "lidar": [ray_count], "proprio": [57], "state": [45]},
         "action": {"shape": [16], "leg": "default_pose + output[:12] * [0.125,0.25,0.25]", "wheel": "output[12:] * 5.0"},
-        "success_rule": "stable plus command-direction check; yaw also requires limited translation drift",
+        "success_rule": "stable plus command-direction check; target episodes also require reaching target_xy",
     }
     (args.output_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     default_pose = torch.tensor([0.0, -0.6, 1.0, 0.0, -0.6, 1.0, 0.0, 0.6, -1.0, 0.0, 0.6, -1.0], device=robot.device).unsqueeze(0)
@@ -232,6 +270,7 @@ def main() -> None:
         start_quat = robot.data.root_quat_w[0].detach().cpu().numpy()
         start_yaw = float(np.arctan2(2.0 * (start_quat[0] * start_quat[3] + start_quat[1] * start_quat[2]), 1.0 - 2.0 * (start_quat[2] ** 2 + start_quat[3] ** 2)))
         yaw_delta = 0.0
+        target_reached = TARGET_RGB is None
         with h5py.File(path, "w") as h5:
             obs = h5.create_group("observation")
             front_ds = obs.create_dataset("front_rgb", (args.steps, args.image_height, args.image_width, 3), dtype="u1", compression="lzf")
@@ -243,12 +282,31 @@ def main() -> None:
             done_ds = h5.create_dataset("terminated", (args.steps,), dtype="u1")
             h5.attrs["task_text"] = args.task_text
             h5.attrs["command"] = np.asarray([args.command_x, args.command_y, args.command_yaw], dtype=np.float32)
+            h5.attrs["stop_after"] = -1 if args.stop_after is None else args.stop_after
+            h5.attrs["stop_on_target"] = args.stop_on_target
+            h5.attrs["target_color"] = args.target_color
+            h5.attrs["target_xy"] = np.asarray([args.target_x, args.target_y], dtype=np.float32)
             h5.attrs["wheel_damping"] = WHEEL_DAMPING
             h5.attrs["expert"] = metadata["expert"]
             for step in range(args.steps):
-                observation = native_observation(robot, joint_ids, last_action)
-                action_np = session.run(["actions"], {"obs": observation.cpu().numpy()})[0]
-                action = torch.from_numpy(action_np).to(robot.device)
+                target_in_range = False
+                if TARGET_RGB is not None:
+                    target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
+                    target_in_range = bool(torch.linalg.vector_norm(target_delta).item() <= 0.8)
+                    target_reached = target_reached or target_in_range
+                command = (0.0, 0.0, 0.0) if args.stop_on_target and target_reached else command_for_step(step)
+                observation = native_observation(robot, joint_ids, last_action, command)
+                # A zero command from the native locomotion policy still
+                # produces residual wheel/posture actions.  For object
+                # reaching, the label after the stop point must be an
+                # unambiguous stationary target: default leg pose and zero
+                # wheel velocity, represented by an all-zero 16-D action.
+                stop_now = (args.stop_after is not None and step >= args.stop_after) or (args.stop_on_target and target_reached)
+                if stop_now:
+                    action = torch.zeros((1, 16), device=robot.device)
+                else:
+                    action_np = session.run(["actions"], {"obs": observation.cpu().numpy()})[0]
+                    action = torch.from_numpy(action_np).to(robot.device)
                 robot.set_joint_position_target(default_pose + action[:, :12] * leg_scale, joint_ids=leg_ids)
                 robot.set_joint_velocity_target(action[:, 12:] * 5.0, joint_ids=wheel_ids)
                 last_action = action
@@ -266,6 +324,9 @@ def main() -> None:
                 proprio_ds[step], state_ds[step], action_ds[step] = observation[0].cpu().numpy(), state, action[0].cpu().numpy()
                 height = float(robot.data.root_pos_w[0, 2].item())
                 min_height, max_height = min(min_height, height), max(max_height, height)
+                if TARGET_RGB is not None:
+                    target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
+                    target_reached = target_reached or bool(torch.linalg.vector_norm(target_delta).item() <= 0.8)
                 gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
                 terminated = int(height < 0.45 or gravity_z > -0.5)
                 done_ds[step] = terminated
@@ -281,13 +342,14 @@ def main() -> None:
                 command_ok = args.command_yaw * yaw_delta > 0.25 and abs(displacement) < 2.0
             else:
                 command_ok = True
-            success = bool(stable and command_ok)
+            success = bool(stable and command_ok and target_reached)
             h5.attrs["x_displacement"] = displacement
             h5.attrs["yaw_delta"] = yaw_delta
             h5.attrs["min_root_height"] = min_height
             h5.attrs["max_root_height"] = max_height
             h5.attrs["terminated_steps"] = terminated_steps
             h5.attrs["command_ok"] = command_ok
+            h5.attrs["target_reached"] = target_reached
             h5.attrs["success"] = success
         video.release()
         displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
@@ -298,11 +360,11 @@ def main() -> None:
             command_ok = args.command_yaw * yaw_delta > 0.25 and abs(displacement) < 2.0
         else:
             command_ok = True
-        success = bool(stable and command_ok)
+        success = bool(stable and command_ok and target_reached)
         print(
             f"[M20PRO-NATIVE-EXPERT] episode={episode} x_displacement={displacement:.4f} m yaw_delta={yaw_delta:.4f} rad "
             f"min_root_height={min_height:.4f} m terminated_steps={terminated_steps} command_ok={command_ok} "
-            f"success={success} data={path} video={video_path}",
+            f"target_reached={target_reached} success={success} data={path} video={video_path}",
             flush=True,
         )
     scene.reset()

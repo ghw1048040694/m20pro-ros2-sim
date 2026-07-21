@@ -20,7 +20,7 @@ import h5py
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from m20_vla_model import M20VLAActionChunk
 
@@ -30,13 +30,17 @@ DEFAULT_DATASETS = [
     DATA_ROOT / "datasets/public_m20_native_v1",
     DATA_ROOT / "datasets/public_m20_native_backward_v1",
     DATA_ROOT / "datasets/public_m20_native_turn_v2",
+    DATA_ROOT / "datasets/m20_object_red_smoke",
+    DATA_ROOT / "datasets/m20_object_blue_v1",
+    DATA_ROOT / "datasets/m20_object_green_v1",
 ]
-DEFAULT_OUTPUT = DATA_ROOT / "checkpoints/m20_vla_bc_v1"
+DEFAULT_OUTPUT = DATA_ROOT / "checkpoints/m20_vla_bc_v4"
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--dataset", type=Path, action="append", default=None, help="Dataset directory; repeatable.")
 parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
 parser.add_argument("--horizon", type=int, default=8, help="Predicted action chunk length.")
+parser.add_argument("--architecture", choices=["global_v1", "spatial_v2"], default="spatial_v2")
 parser.add_argument("--stride", type=int, default=2, help="Window stride in expert frames.")
 parser.add_argument("--epochs", type=int, default=40)
 parser.add_argument("--batch-size", type=int, default=64)
@@ -88,6 +92,10 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                 rear = downsample_rgb(np.asarray(obs["rear_rgb"], dtype=np.uint8))
                 lidar = np.asarray(obs["lidar"], dtype=np.float32)
                 proprio = np.asarray(obs["proprio"], dtype=np.float32)
+                # The native 57-D protocol contains a privileged velocity
+                # command at indices 6:9.  VLA must infer intent from the
+                # language token and visual scene instead of copying it.
+                proprio[:, 6:9] = 0.0
                 action = np.asarray(h5["action"], dtype=np.float32)
                 if not (len(front) == len(rear) == len(lidar) == len(proprio) == len(action)):
                     raise ValueError(f"Length mismatch in {path}")
@@ -177,28 +185,51 @@ def main() -> None:
     seed_everything(args.seed)
     dataset_dirs = args.dataset or DEFAULT_DATASETS
     episodes = load_episodes(dataset_dirs)
-    random.Random(args.seed).shuffle(episodes)
-    val_count = max(1, int(round(len(episodes) * args.val_fraction))) if len(episodes) > 1 else 0
-    val_episodes = episodes[:val_count]
-    train_episodes = episodes[val_count:] or episodes
+    grouped: dict[str, list[Episode]] = {}
+    for episode in episodes:
+        grouped.setdefault(episode.task_text, []).append(episode)
+    train_episodes: list[Episode] = []
+    val_episodes: list[Episode] = []
+    split_rng = random.Random(args.seed)
+    for task_episodes in grouped.values():
+        split_rng.shuffle(task_episodes)
+        # A singleton language is too scarce to hold out.  Languages with
+        # repeated demonstrations retain at least one episode for validation.
+        val_count = max(1, int(round(len(task_episodes) * args.val_fraction))) if len(task_episodes) > 1 else 0
+        val_count = min(val_count, len(task_episodes) - 1)
+        val_episodes.extend(task_episodes[:val_count])
+        train_episodes.extend(task_episodes[val_count:])
     train_set = ChunkDataset(train_episodes, args.horizon, args.stride)
     val_set = ChunkDataset(val_episodes, args.horizon, args.stride) if val_episodes else None
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    task_window_counts: dict[str, int] = {}
+    for episode_id, _ in train_set.windows:
+        task_text = train_set.episodes[episode_id].task_text
+        task_window_counts[task_text] = task_window_counts.get(task_text, 0) + 1
+    sample_weights = [
+        1.0 / task_window_counts[train_set.episodes[episode_id].task_text]
+        for episode_id, _ in train_set.windows
+    ]
+    sampler_generator = torch.Generator().manual_seed(args.seed)
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_set), replacement=True, generator=sampler_generator)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, sampler=sampler, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True) if val_set else None
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
-    model = M20VLAActionChunk(args.horizon).to(device)
+    model = M20VLAActionChunk(args.horizon, architecture=args.architecture).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config = {
-        "format": "m20_vla_action_chunk_bc_v1",
+        "format": "m20_vla_action_chunk_bc_v4",
+        "architecture": args.architecture,
         "horizon": args.horizon,
         "stride": args.stride,
         "image_shape": [6, 48, 80],
         "lidar_shape": [72],
         "proprio_shape": [57],
+        "proprio_command_mask": [6, 7, 8],
         "action_shape": [16],
         "languages": sorted({episode.task_text for episode in episodes}),
+        "sampling": "uniform_by_task_text",
         "datasets": [str(directory) for directory in dataset_dirs],
         "train_episodes": [str(episode.path) for episode in train_episodes],
         "val_episodes": [str(episode.path) for episode in val_episodes],
