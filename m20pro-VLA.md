@@ -73,6 +73,7 @@ Last updated: 2026-07-21 CST
 - 不再把“平地上腿必须摆动”作为训练目标。下一实现里程碑是将现有 v3 重构为 4 维轮式巡航基线，并新建独立 12 维腿部跳跃环境。
 - 已新建 `M20ProJumpEnv` / `M20ProJumpEnvCfg`：12 维腿力矩动作、56 维观测，轮关节在 `_apply_action()` 中固定为零力矩；当前目标高度为 0.80 m，还未加入障碍物。
 - 跳跃环境已通过 1 环境 × 1 步和 4 环境 × 24 步 smoke（配置接口、刚体和零轮力矩均通过）；当前还没有声称跳跃已训练成功。
+- 已将 `M20Pro-Jump-Direct-v0` 注册到 Gym 并接入 `M20ProJumpPPORunnerCfg`；同一个 `train_m20pro_ppo.sh` 可通过 `--task` 切换平地巡航与腿部跳跃。跳跃任务现在还是原地跳跃，尚未加障碍物和 1 m 课程。
 - 已记录 PPO 指标含义：`Loss/value_function` 是 critic 价值回归误差，`Loss/surrogate` 是 PPO 裁剪策略损失，`Policy/mean_noise_std` 是 actor 输出动作分布的平均探索标准差。
 
 ## 常用验证

@@ -11,6 +11,7 @@ parser.add_argument("--num-envs", type=int, default=64)
 parser.add_argument("--iterations", type=int, default=2)
 parser.add_argument("--rollout-steps", type=int, default=24)
 parser.add_argument("--log-dir", type=str, default="logs/rsl_rl/m20pro_locomotion_smoke")
+parser.add_argument("--task", type=str, default="M20Pro-Locomotion-Flat-v0")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -21,21 +22,22 @@ import gymnasium as gym  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
-from tasks.m20pro_locomotion import M20ProLocomotionEnvCfg  # noqa: E402
-from tasks.m20pro_locomotion.agents import M20ProLocomotionPPORunnerCfg  # noqa: E402
+from tasks.m20pro_locomotion import M20ProJumpEnvCfg, M20ProLocomotionEnvCfg  # noqa: E402
+from tasks.m20pro_locomotion.agents import M20ProJumpPPORunnerCfg, M20ProLocomotionPPORunnerCfg  # noqa: E402
 
 
 env = None
 try:
-    env_cfg = M20ProLocomotionEnvCfg()
+    is_jump = args.task == "M20Pro-Jump-Direct-v0"
+    env_cfg = M20ProJumpEnvCfg() if is_jump else M20ProLocomotionEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.sim.device = args.device or "cuda:0"
-    agent_cfg = M20ProLocomotionPPORunnerCfg()
+    agent_cfg = M20ProJumpPPORunnerCfg() if is_jump else M20ProLocomotionPPORunnerCfg()
     agent_cfg.max_iterations = args.iterations
     agent_cfg.num_steps_per_env = args.rollout_steps
     agent_cfg.experiment_name = "m20pro_locomotion_smoke"
 
-    env = gym.make("M20Pro-Locomotion-Flat-v0", cfg=env_cfg)
+    env = gym.make(args.task, cfg=env_cfg)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=args.log_dir, device=agent_cfg.device)
     print(f"[M20PRO-PPO] training envs={args.num_envs} iterations={args.iterations}", flush=True)

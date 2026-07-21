@@ -16,7 +16,9 @@ import gymnasium as gym  # noqa: E402
 import tasks.m20pro_locomotion  # noqa: F401, E402
 
 assert "M20Pro-Locomotion-Flat-v0" in gym.registry
+assert "M20Pro-Jump-Direct-v0" in gym.registry
 spec = gym.spec("M20Pro-Locomotion-Flat-v0")
 print(f"[M20PRO-GYM] registered: {spec.id}")
 print(f"[M20PRO-GYM] entry_point: {spec.entry_point}")
+print(f"[M20PRO-GYM] registered: {gym.spec('M20Pro-Jump-Direct-v0').id}")
 app.close()

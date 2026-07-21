@@ -32,3 +32,9 @@ class M20ProLocomotionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class M20ProJumpPPORunnerCfg(M20ProLocomotionPPORunnerCfg):
+    experiment_name = "m20pro_jump"
+    max_iterations = 1000
