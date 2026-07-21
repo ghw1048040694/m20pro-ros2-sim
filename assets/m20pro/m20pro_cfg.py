@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg
+from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 
@@ -54,4 +54,23 @@ M20PRO_CFG = ArticulationCfg(
             friction=0.0,
         ),
     },
+)
+
+M20PRO_JUMP_CFG = M20PRO_CFG.replace(
+    actuators={
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[".*_(hipx|hipy|knee)_joint"],
+            stiffness=80.0,
+            damping=8.0,
+            effort_limit_sim=76.4,
+            velocity_limit_sim=22.4,
+        ),
+        "wheels_locked": ImplicitActuatorCfg(
+            joint_names_expr=[".*_wheel_joint"],
+            stiffness=120.0,
+            damping=12.0,
+            effort_limit_sim=21.6,
+            velocity_limit_sim=79.3,
+        ),
+    }
 )

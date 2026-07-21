@@ -6,17 +6,20 @@ from .m20pro_locomotion_env import M20ProLocomotionEnv
 
 
 class M20ProJumpEnv(M20ProLocomotionEnv):
-    """Train vertical leg power with wheel torques disabled."""
+    """Train vertical leg coordination with wheels position-locked."""
 
     def __init__(self, cfg, render_mode=None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         self.max_base_height = self.robot.data.root_pos_w[:, 2].clone()
+        self._leg_ids, _ = self.robot.find_joints(".*_(hipx|hipy|knee)_joint")
+        self._wheel_ids, _ = self.robot.find_joints(".*_wheel_joint")
 
     def _apply_action(self):
-        # The first 12 actions are leg torques. Wheels remain passive/locked.
-        forces = self.action_scale * self.joint_gears[:12] * self.actions
-        wheel_forces = torch.zeros((self.num_envs, 4), device=self.sim.device)
-        self.robot.set_joint_effort_target(torch.cat((forces, wheel_forces), dim=-1), joint_ids=self._joint_dof_idx)
+        # Actions are normalized leg joint targets; wheels remain position-locked.
+        leg_targets = torch.clamp(self.actions * 0.8, min=-0.8, max=0.8)
+        self.robot.set_joint_position_target(leg_targets, joint_ids=self._leg_ids)
+        wheel_targets = self.robot.data.default_joint_pos[:, self._wheel_ids]
+        self.robot.set_joint_position_target(wheel_targets, joint_ids=self._wheel_ids)
 
     def _get_rewards(self) -> torch.Tensor:
         self._compute_intermediate_values()
