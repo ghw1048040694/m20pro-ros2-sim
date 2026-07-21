@@ -87,10 +87,30 @@ Last updated: 2026-07-21 CST
 - jump v2 回放表明腿部会动但不起跳：最低高度 `0.4978 m`、腿速 `1.6128 rad/s`、平均前向速度 `0.3375 m/s`，表明不对称腿动作在制造水平漂移。
 - jump v3 加入 57 维 phase 观测（下蹲、起跳、腾空三阶段），并将 episode 缩短到 2 s 以增强时序学习。新版已通过 4 环境 × 24 步 smoke，但尚未重新训练；旧 jump checkpoint 与 57 维观测不兼容。
 - jump v3 重训后仍不起跳：200 步回放最低高度 `0.5158 m`，说明纯力矩探索仍很难学会协调伸腿。
-- 跳跃控制进一步改为 12 维目标关节姿态 + 物理 PD，轮关节使用高刚度位置锁定。开环“收腿 → 伸腿”探针已达到 `max_root_height=0.8223 m`，高于 0.80 m 目标，证明 USD 模型的跳跃动力学可行。下一步是在这个操作空间重训 jump v4。
+- 历史记录曾写入开环探针 `max_root_height=0.8223 m`，但在本轮重新验证中无法复现：带前后相机和 LiDAR 的场景下，`squat_minus_thrust_plus` 为 `max=0.7106 m/min=0.0700 m`，反向符号为 `max=0.7130 m/min=0.0700 m`，两者都倒地。因此 0.8223 m 暂时降级为“未复现历史结果”，不能作为成功专家。
 - jump v4 重训仍然没有学到时序：200 步回放最低高度 `0.4178 m`、`done_count=32`，但开环探针已证明 PD 目标姿态可以跳。
 - 已加入 jump v5 reference bootstrap 奖励：phase 前 30% 学习收腿目标，中间阶段学习伸腿目标，同时保留高度、上向速度和腾空奖励。这是用已验证的开环序列帮助 PPO 先学会可行跳跃时序，后续再降低 reference 权重。
 - 已记录 PPO 指标含义：`Loss/value_function` 是 critic 价值回归误差，`Loss/surrogate` 是 PPO 裁剪策略损失，`Policy/mean_noise_std` 是 actor 输出动作分布的平均探索标准差。
+
+### 公开专家与模仿学习切换（2026-07-21）
+
+- 当前判断：继续调 M20 jump PPO 奖励没有证据能得到可靠动作，正式切换到“公开专家 → 轨迹采集 → M20 动作重定向 → 模仿学习”的路线。PPO 保留为失败对照实验，不再作为主要技能来源。
+- Isaac Lab 官方公开的 Go2 rough-terrain RSL-RL checkpoint 已成功下载到 2 TB 盘：`.pretrained_checkpoints/rsl_rl/Isaac-Velocity-Rough-Unitree-Go2-v0/checkpoint.pt`，同时生成 TorchScript 和 ONNX 导出。来源仓库：[IsaacLab](https://github.com/isaac-sim/IsaacLab)，遵循其 BSD-3-Clause 许可和 checkpoint 发布条款。
+- `scripts/record_public_go2_expert.sh` 已采集 400 步固定 `0.8 m/s` 前向命令：`datasets/public_go2_rough_v0/episode_0000.h5`，观测维度 `235`（含 187 维 height scan），动作维度 `12`，额外记录实际 `joint_position_target`、命令、状态和 episode done。`done_count=0`。
+- 公共专家视频已生成：`videos/public_go2_rough_v0/public-go2-rough-expert-step-0.mp4`，400 步、50 Hz；视频已通过抽帧确认能看到 Go2 行走。所有采集/回放命令均保留 `--video` 和独立 `--video-dir`。
+- `scripts/retarget_go2_to_m20.py` 已把 Go2 `hip/thigh/calf` 映射到 M20 `hipx/hipy/knee`，输出 `m20_retarget_v0.h5`。当前只做名称、站立偏置和范围映射，`validated=False`；腿关节符号、偏置和 M20 形态缩放必须通过 M20 视频回放校准后才能训练。
+- 重定向第三人称视频验证结果：幅度 `1.0` 时 `min_root_height=0.2710 m`、向后 `0.6189 m`；幅度 `0.50` 时 `min=0.2997 m`、向后 `0.6470 m`；幅度 `0.35` 时 `min=0.5617 m`、位移 `+0.0070 m`；幅度 `0.25` 时 `min=0.5756 m`、位移 `+0.0016 m`。因此 `0.25–0.35` 是当前稳定但几乎不前进的安全区，Go2 足式步态不能直接成为 M20 轮腿巡航动作。
+- 对应视频均写入 `videos/m20_retarget_amp025_v0/`、`videos/m20_retarget_amp035_v0/` 和 `videos/m20_retarget_amp050_v0/`，回放器为 `scripts/play_m20_retargeted.sh`；这些 MP4 是校准证据，不是最终 VLA 成果。
+- 本轮新增的 M20 传感器采集器 `scripts/record_m20pro_expert.sh` 已验证前后 `160x96` RGB、72 线环形 LiDAR、45 维状态和 HDF5/MP4 同步写入；其开环 jump 样本因倒地标记为诊断数据，不进入成功专家集合。
+
+公开参考路线（用于数据/接口，不直接把异构机器人 checkpoint 当成 M20 策略）：
+
+- [LeRobot](https://github.com/huggingface/lerobot)：数据集、动作 chunk 和 ACT/Diffusion/SmolVLA 训练接口。
+- [Open X-Embodiment / OpenVLA](https://github.com/openvla/openvla)：开放 VLA 数据和架构参考；7B 全量训练不适合本机 RTX 3060。
+- [Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T)：embodiment/action schema 参考；本机不做 N1.7 全量微调。
+- [Unitree RL Gym](https://github.com/unitreerobotics/unitree_rl_gym)：公开四足 RL 训练/部署参考，后续用于动作语义核对。
+
+下一阶段先做 Go2→M20 重定向视频校准；确认腿顺序、符号和站立姿态后，再把 M20 的前后相机、LiDAR、语言任务标签合并进 LeRobot-compatible 数据集，最后训练小型 BC/ACT 基线。
 
 ## 常用验证
 
@@ -105,6 +125,32 @@ TERM=xterm python scripts/check_m20pro_task.py --headless
 `isaaclab.sh` 运行时需要 `TERM=xterm`，以避免 `TERM=dumb` 下 `tabs` 命令失败。
 
 回放命令默认应包含 `--video` 和独立 `--video-dir`，以 headless rendering 生成 MP4；不再只给无视频的回放命令。
+
+公开 Go2 专家采集（自动包含视频）：
+
+```bash
+./scripts/record_public_go2_expert.sh \
+  --steps 400 \
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_go2_rough_v0 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_go2_rough_v0
+```
+
+Go2→M20 目标动作重定向（此命令不启动 Isaac Sim）：
+
+```bash
+python scripts/retarget_go2_to_m20.py \
+  /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_go2_rough_v0/episode_0000.h5 \
+  /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_go2_rough_v0/m20_retarget_v0.h5
+```
+
+M20 第三人称重定向回放（自动录制视频）：
+
+```bash
+./scripts/play_m20_retargeted.sh \
+  --actions-h5 /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_go2_rough_v0/m20_retarget_v0.h5 \
+  --steps 200 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_retargeted_v0
+```
 
 ## PPO / TensorBoard 指标词典
 
@@ -157,11 +203,11 @@ Actor 输出的动作高斯分布的平均标准差。策略从 `Normal(mean_act
 
 ## 待办路线
 
-1. 将 `M20ProLocomotionEnv` 注册成 Gym 任务，接入 RSL-RL PPO，完成平地轮腿移动训练。
-2. 回放 `model_99.pt`，统计倒地率、根高度和 +X 速度，调整平地站立/前进奖励。
-3. 加入相机、激光雷达和语言 embedding 观测，保持一个统一 policy 接口。
-3. 加入随机障碍和 1 m 跳跃课程，再做跨障与导航联合训练。
-4. 加入开放词汇物体搜索、地图/无地图切换和语言任务评测。
+1. 在 M20 上回放 `m20_retarget_v0.h5`，校准 Go2→M20 的腿顺序、符号、站立偏置和目标范围；先只验证视频和根高度，不训练 VLA。
+2. 采集通过校准的 M20 rolling/jump 专家轨迹，统一保存前后 RGB、72 线 LiDAR、45 维状态、12/4 维动作和自然语言任务标签。
+3. 转换为 LeRobot-compatible 数据集，训练小型 BC/ACT action-chunk 基线，再加入语言和视觉条件。
+4. 加入随机障碍和 1 m 越障任务，训练 VLA 高层技能选择（rolling/jump），而不是让单一 PPO 直接探索跳跃时序。
+5. 加入开放词汇物体搜索、地图/无地图切换和语言任务评测。
 
 ### 并行环境容量基准
 

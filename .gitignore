@@ -45,12 +45,15 @@ dddmr_navigation/
 
 # Isaac Sim / Isaac Lab runtime output
 /.isaac-cache/
+/.pretrained_checkpoints/
+/.pretrained_checkpoints
 /outputs/
 /wandb/
 /logs/
 /videos/
 /logs
 /videos
+/datasets
 /assets/m20pro/*.usd
 /assets/m20pro/.asset_hash
 /assets/m20pro/config.yaml

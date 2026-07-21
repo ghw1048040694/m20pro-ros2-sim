@@ -77,3 +77,30 @@ Smoke-test the leg-only jump skill:
 ```bash
 ./scripts/smoke_m20pro_jump.sh --num-envs 4 --steps 24
 ```
+
+Record NVIDIA's published Isaac Lab Go2 expert with a video and a 235-dim
+observation trajectory. The checkpoint cache, HDF5 data, and MP4 are placed on
+the 2 TB output disk:
+
+```bash
+./scripts/record_public_go2_expert.sh \
+  --steps 400 \
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_go2_rough_v0 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_go2_rough_v0
+```
+
+Retarget its 12 joint targets to the M20 leg order. The output is marked
+`validated=False` until a M20 video replay confirms signs and offsets:
+
+```bash
+python scripts/retarget_go2_to_m20.py INPUT.h5 OUTPUT.h5
+```
+
+Replay the retargeted actions on the M20. This is a third-person video
+calibration pass and reports root-height/displacement diagnostics:
+
+```bash
+./scripts/play_m20_retargeted.sh \
+  --actions-h5 OUTPUT.h5 --steps 200 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_retargeted_v0
+```

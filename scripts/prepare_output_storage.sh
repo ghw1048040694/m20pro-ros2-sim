@@ -13,8 +13,12 @@ if ! mountpoint -q "${MOUNT_ROOT}"; then
   exit 2
 fi
 
-mkdir -p "${OUTPUT_ROOT}/logs" "${OUTPUT_ROOT}/videos"
-for name in logs videos; do
+mkdir -p \
+  "${OUTPUT_ROOT}/logs" \
+  "${OUTPUT_ROOT}/videos" \
+  "${OUTPUT_ROOT}/datasets" \
+  "${OUTPUT_ROOT}/public_experts/isaaclab_checkpoints"
+for name in logs videos datasets; do
   target="${OUTPUT_ROOT}/${name}"
   link="${WS_DIR}/${name}"
   if [[ -e "${link}" && ! -L "${link}" ]]; then
@@ -23,6 +27,13 @@ for name in logs videos; do
   fi
   ln -sfn "${target}" "${link}"
 done
+
+checkpoint_link="${WS_DIR}/.pretrained_checkpoints"
+if [[ -e "${checkpoint_link}" && ! -L "${checkpoint_link}" ]]; then
+  echo "Refusing to replace non-symlink ${checkpoint_link}" >&2
+  exit 3
+fi
+ln -sfn "${OUTPUT_ROOT}/public_experts/isaaclab_checkpoints" "${checkpoint_link}"
 
 echo "M20Pro outputs: ${OUTPUT_ROOT}"
 df -h "${MOUNT_ROOT}"
