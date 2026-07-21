@@ -21,7 +21,7 @@ import torch
 DEFAULT_ROOT = Path(
     "/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA"
 )
-DEFAULT_SOURCE = DEFAULT_ROOT / "public_experts/sources/parkour/rsl_rl"
+DEFAULT_SOURCE = DEFAULT_ROOT / "public_experts/parkour_go1/rsl_rl"
 DEFAULT_CHECKPOINT = DEFAULT_ROOT / "public_experts/parkour_go1/skill/model_674000.pt"
 
 

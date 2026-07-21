@@ -56,9 +56,9 @@ Last updated: 2026-07-22 CST
 - 修正连续轮关节的无限位置归一化（避免 `Inf/Inf` 导致轮位置观测 NaN）。现在 1 个环境运行 4 步的 reset/step smoke 测试通过：`obs=(1, 60)`、`reward_mean=0.9000`、`terminated=0`。
 - 已注册 Gymnasium 任务 `M20Pro-Locomotion-Flat-v0`，并加入 RSL-RL PPO runner 配置。`check_m20pro_gym_registration.py` 已在 headless Kit 中验证 entry point 和 registry。
 - 根据 RTX 3060 资源调低初始训练设置：默认任务并行环境现调为 128，PPO 脚本默认为 64。
-- 用户已完成首次 PPO smoke 训练：16 个并行环境、2 次迭代。本地已产生 `logs/rsl_rl/m20pro_locomotion_smoke/model_0.pt` 和 `model_1.pt`，并有 TensorBoard event 文件；训练进程已退出、显存已释放。
+- 用户已完成首次 PPO smoke 训练：16 个并行环境、2 次迭代。相关 checkpoint 已在后续空间清理中删除，指标和结论保留在本日志；训练进程已退出、显存已释放。
 - 完成并行环境基准：16、32、64、128、256 均通过 4 步 reset/step，结果保存在 `logs/m20pro_env_benchmark/summary.tsv`。因为这是短测试，首轮长训练先用 64，再升到 128/256。
-- 完成 64 环境、100 次 PPO 训练，生成 `logs/rsl_rl/m20pro_locomotion_64_env_100/model_99.pt`。TensorBoard 中 `mean_reward` 从约 104.9 到 91.9，`mean_episode_length` 从 54.5 到 42.3；PPO 确实更新，但当前策略有摔倒趋势，需先回放和调整奖励/初始姿态。
+- 完成 64 环境、100 次 PPO 训练；checkpoint 已在后续空间清理中删除。TensorBoard 中 `mean_reward` 从约 104.9 到 91.9，`mean_episode_length` 从 54.5 到 42.3；PPO 确实更新，但当前策略有摔倒趋势，需先回放和调整奖励/初始姿态。
 - 新增 `play_m20pro_ppo.sh`，用于无头回放 checkpoint，并输出前进位移、最低根高度和终止步数。
 - 回放 `model_99.pt` 得到：1000 步平均 +X 位移仅 `0.0038 m`，最低根高度 `0.3594 m`，终止步数 0。结论是策略学会了原地站立，没有学会前进。
 - 针对奖励漏洞完成第二版环境：改用 1 m/s 前向速度指数跟踪奖励，降低静止存活奖励，增加侧向/垂向/角速度和动作代价。轮关节改为显式 DC motor 力矩执行器，PPO rollout 由 smoke 的 4 步恢复到 24 步，初始探索噪声由 1.0 降到 0.5。
@@ -106,7 +106,7 @@ Last updated: 2026-07-22 CST
 
 ### 公开 Go1 parkour 专家协议验证（2026-07-22）
 
-- 找到并整理了 Robot Parkour Learning（CoRL 2023，MIT）公开 Go1 checkpoint：`public_experts/parkour_go1/skill/model_674000.pt`（视觉 crawl/jump/leap）和 `walk/model_107500.pt`（本体 walk）。Extreme Parkour 源码另存于 `public_experts/sources/extreme-parkour`，许可证为 CC BY-NC 4.0；本轮没有把它作为可直接下载的 checkpoint。
+- 找到并整理了 Robot Parkour Learning（CoRL 2023，MIT）公开 Go1 checkpoint：`public_experts/parkour_go1/skill/model_674000.pt`（视觉 crawl/jump/leap）和 `walk/model_107500.pt`（本体 walk）。Extreme Parkour 源码曾以 CC BY-NC 4.0 临时保存，已在空间清理中删除；本轮没有把它作为可直接下载的 checkpoint。
 - 新增 `scripts/validate_public_parkour_checkpoint.py`。它按 checkpoint 的真实协议构造 `48 维本体 + 1x48x64 深度图`，使用 `weights_only=True` 加载并验证 GRU、动作形状和记忆复位。验证结果：`observation_shape=[4,3120]`、`action_shape=[8,4,12]`、动作范围约 `[-0.8223,0.3638]`，平面/障碍深度会改变动作。
 - 新增 `scripts/play_public_go1_parkour.py` 和 `play_public_go1_parkour.sh`，原生加载 Isaac Lab Go1 USD，使用公开 `Kp=40/Kd=0.5`、0.5 action scale、前向深度预处理和第三人称 MP4。所有回放命令强制带 `--video`。
 - 公开策略在当前 Isaac Lab 5.1/2.3.2 适配器中没有形成可靠步态：skill checkpoint、0.45 m 障碍、200 步回放为 `x_displacement=-2.3574 m`、`min_root_height=0.0604 m`；无障碍仍倒地。walk checkpoint 作为无视觉对照也失败：200 步为 `x_displacement=-1.9766 m`、`min_root_height=0.0612 m`。
@@ -139,6 +139,26 @@ Last updated: 2026-07-22 CST
 - 上游仓库未发现可供重新分发的根目录 LICENSE 文件；本项目只在本机保留来源说明和个人研究验证，不把外部源码或权重提交到仿真仓库或 VLA-Learning 仓库。
 
 当前判断：原生 M20 policy 已经是合格的 rolling 专家，但它没有跳跃能力，也没有语言、相机和 LiDAR 决策能力。因此“自然语言找物体/导航 + 1 m 障碍跳跃”仍未完成；下一步先采集多命令 rolling 正样本，再加入可物理验证的 jump skill，最后训练小型语言条件 action-chunk BC/VLA，而不是继续盲目增加 PPO 迭代。
+
+### 语言条件多模态 VLA/BC v1（2026-07-22）
+
+- 新增 [train_m20_vla_bc.py](scripts/train_m20_vla_bc.py)：输入为前后 RGB（下采样为 `6x48x80`）、72 线 LiDAR、原生 57 维 proprio 和 UTF-8 语言字节序列，输出连续 `8x16` action chunk。它是公开专家模仿学习，不使用奖励函数或 PPO。
+- 训练数据只读取 HDF5 `success=true` episode：forward 4 条、backward 1 条、turn v2 1 条，共 `6` 条 episode、`985` 个训练窗口、`247` 个验证窗口。checkpoint 位于 `checkpoints/m20_vla_bc_v1/best.pt`，约 `1.8 MB`，训练最佳验证损失 `9.741e-5`。
+- 新增 [play_m20_vla_bc.py](scripts/play_m20_vla_bc.py)：默认每 4 个控制周期执行一个预测 chunk，再重新读取传感器，真正使用 action chunk 而不是只取第一步；每次强制写 MP4 和 JSON 指标。
+- 闭环 forward chunk4 250 步结果：`x_displacement=7.3347 m`、`mean_forward_speed=0.3676 m/s`、`yaw_delta=0.026 rad`、`min_root_height=0.5152 m`、`terminated_steps=0`。50 步 backward 结果为 `x=-1.2321 m`、平均 `-0.3112 m/s`、`terminated_steps=0`；50 步 turn 结果为 `yaw_delta=0.114 rad`、`x=0.4440 m`、`min_root_height=0.5179 m`、`terminated_steps=0`。
+- 当前 VLA 只学会语言条件下的 rolling/backward/turn 低层动作，语言标签仍是运动指令；它尚未学习“寻找某物体”、地图/无地图探索或 jump skill，不能把 v1 宣称为完整任务完成。
+
+### Jump 专家搜索边界（2026-07-22）
+
+- GitHub/API 搜索了 M20/DeepRobotics/wheel-legged parkour 公开仓库，没有找到可复用的 M20 jump checkpoint；保留的原生 M20公开专家只有 rolling `policy.onnx`。
+- 新增 [search_m20_jump_expert.py](scripts/search_m20_jump_expert.py)，显式使用官方镜像姿态和前后腿镜像膝关节，采用 `Kp=200/Kd=4`、短下蹲/起跳目标序列，并行执行 `324` 个纯物理候选；v2 最高 `max_root_height=0.6618 m`，v3 扩展时序后最高 `0.6738 m`，所有候选均未满足 `min_root_height>=0.45 m` 的稳定判据。
+- 这证明当前 M20 USD/执行器和简单关节目标序列还不能产生可验证 1 m 跳跃；失败序列不进入 VLA 数据集。搜索结果只保留在 2 TB 盘 `logs/m20_jump_expert_search_v1/v2/v3.json`，不再继续盲目 PPO 跳跃训练。
+
+### 数据清理与存储（2026-07-22）
+
+- 已删除旧 `logs/rsl_rl` PPO checkpoint、失败 jump HDF5/视频、重复诊断视频，以及已完成协议核对的大型源码克隆（约 `803 MB`）。
+- 只保留：`datasets/public_m20_native_v1`、`public_m20_native_backward_v1`、`public_m20_native_turn_v2`、VLA checkpoint、必要的 M20 `policy.onnx`/协议文件、Go1 checkpoint 和精简 `rsl_rl` 源码。清理后 `M20ProVLA` 总占用约 `102 MB`，训练、视频、日志全部仍位于 2 TB 盘。
+- 原始来源仓库没有复制进 Git；`public_experts/m20_native/` 仅保留模型和协议快照，个人研究使用，不重新分发外部权重。
 
 ## 常用验证
 
@@ -187,6 +207,24 @@ M20 第三人称重定向回放（自动录制视频）：
   --steps 500 --warmup-steps 75 \
   --command-x 0.5 --command-y 0.0 --command-yaw 0.0 \
   --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_m20_native_v1
+```
+
+训练语言条件多模态 action-chunk VLA/BC：
+
+```bash
+./scripts/train_m20_vla_bc.sh \
+  --epochs 40 --batch-size 64 --horizon 8 --stride 2 \
+  --device cuda:0 \
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v1
+```
+
+VLA 闭环回放（自动写视频和 JSON 指标）：
+
+```bash
+./scripts/play_m20_vla_bc.sh \
+  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v1/best.pt \
+  --task-text "向前走" --steps 250 --chunk-execution 4 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_bc_forward_250
 ```
 
 采集原生 M20 rolling 正样本（每个 episode 自动写 HDF5 和 MP4）：
@@ -250,11 +288,11 @@ Actor 输出的动作高斯分布的平均标准差。策略从 `Normal(mean_act
 
 ## 待办路线
 
-1. 用 `record_public_m20_expert.sh` 采集多命令 rolling 正样本，统一保存前后 RGB、72 线 LiDAR、57 维原生 proprio、45 维状态、16 维动作和自然语言任务标签。
-2. 继续寻找/构造可物理验证的 M20 jump expert；未通过 `min_root_height`、高度和视频检查的跳跃数据不得进入成功专家集合。
-3. 转换为 LeRobot-compatible 数据集，训练小型 BC/ACT action-chunk 基线，再加入语言和视觉条件。
-4. 加入随机障碍和 1 m 越障任务，训练 VLA 高层技能选择（rolling/jump），而不是让单一 PPO 直接探索跳跃时序。
-5. 加入开放词汇物体搜索、地图/无地图切换和语言任务评测。
+1. 扩充成功的 forward/backward/turn 专家，并加入停止、侧移等语言指令；诊断失败样本继续隔离。
+2. 解决 jump skill 的物理能力问题：优先查找官方动作/仿真协议或调整 M20 USD/执行器，未通过高度、越障和视频检查不得进入 VLA 数据。
+3. 将 VLA 数据集扩展为 LeRobot-compatible episode/skill schema，加入 rolling/jump skill token 和 action chunk。
+4. 在具备成功 jump expert 后加入随机障碍、1 m 越障、地图/无地图和开放词汇物体搜索评测。
+5. 训练高层语言/视觉/LiDAR skill selector，并用闭环视频和任务成功率验收，而不是只看离线 loss。
 
 ### 并行环境容量基准
 

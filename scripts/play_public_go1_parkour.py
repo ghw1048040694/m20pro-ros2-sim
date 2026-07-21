@@ -21,7 +21,7 @@ from isaaclab.app import AppLauncher
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
 DEFAULT_CHECKPOINT = DATA_ROOT / "public_experts/parkour_go1/skill/model_674000.pt"
 DEFAULT_WALK_CHECKPOINT = DATA_ROOT / "public_experts/parkour_go1/walk/model_107500.pt"
-DEFAULT_SOURCE = DATA_ROOT / "public_experts/sources/parkour/rsl_rl"
+DEFAULT_SOURCE = DATA_ROOT / "public_experts/parkour_go1/rsl_rl"
 DEFAULT_VIDEO_DIR = Path(os.environ.get("M20PRO_OUTPUT_ROOT", str(DATA_ROOT))) / "videos/public_parkour_go1"
 
 parser = argparse.ArgumentParser(description=__doc__)

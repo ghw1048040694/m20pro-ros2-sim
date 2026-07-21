@@ -21,7 +21,7 @@ from isaaclab.app import AppLauncher
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
 DEFAULT_POLICY = (
     DATA_ROOT
-    / "public_experts/sources/M20-autonomy-sim/src/M20_sdk_deploy/policy/policy.onnx"
+    / "public_experts/m20_native/policy.onnx"
 )
 DEFAULT_VIDEO_DIR = Path(os.environ.get("M20PRO_OUTPUT_ROOT", str(DATA_ROOT))) / "videos/public_m20_native"
 

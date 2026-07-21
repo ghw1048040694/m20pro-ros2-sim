@@ -63,14 +63,40 @@ Run the first real environment reset/step smoke test:
 ./scripts/smoke_m20pro_locomotion.sh --num-envs 1 --steps 4
 ```
 
-Record a trained policy without opening the Isaac Sim GUI:
+The old PPO runs are retained only as documented failure baselines; new VLA
+training uses the public M20 expert trajectories below. All output paths are
+on the 2 TB disk.
+
+Train the compact multimodal language-conditioned action-chunk policy:
 
 ```bash
-./scripts/play_m20pro_ppo.sh \
-  --checkpoint logs/rsl_rl/m20pro_locomotion_v2/model_299.pt \
-  --num-envs 1 --steps 400 --video \
-  --video-dir videos/m20pro_locomotion_v2
+./scripts/train_m20_vla_bc.sh \
+  --epochs 40 --batch-size 64 --horizon 8 --stride 2 --device cuda:0 \
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v1
 ```
+
+Replay it in a closed-loop Isaac Sim run. The wrapper always records a video
+and the Python script writes a JSON metrics sidecar:
+
+```bash
+./scripts/play_m20_vla_bc.sh \
+  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_bc_v1/best.pt \
+  --task-text "向前走" --steps 250 --chunk-execution 4 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_bc_forward_250
+```
+
+Record additional native M20 expert trajectories only when their JSON
+`success` field is true:
+
+```bash
+./scripts/record_public_m20_expert.sh \
+  --episodes 4 --steps 500 --task-text "向前走" --command-x 0.5 \
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/datasets/public_m20_native_v1 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_m20_native_v1
+```
+
+Legacy PPO checkpoint files were removed during cleanup; their failure metrics
+remain in `m20pro-VLA.md`, but they are no longer a runnable storage target.
 
 Smoke-test the leg-only jump skill:
 
