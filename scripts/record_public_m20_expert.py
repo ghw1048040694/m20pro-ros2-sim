@@ -202,7 +202,7 @@ def main() -> None:
         "observation": {"front_rgb": [args.image_height, args.image_width, 3], "rear_rgb": [args.image_height, args.image_width, 3],
                          "lidar": [ray_count], "proprio": [57], "state": [45]},
         "action": {"shape": [16], "leg": "default_pose + output[:12] * [0.125,0.25,0.25]", "wheel": "output[12:] * 5.0"},
-        "success_rule": "terminated_steps == 0 and min_root_height >= 0.45 m",
+        "success_rule": "stable plus command-direction check; yaw also requires limited translation drift",
     }
     (args.output_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     default_pose = torch.tensor([0.0, -0.6, 1.0, 0.0, -0.6, 1.0, 0.0, 0.6, -1.0, 0.0, 0.6, -1.0], device=robot.device).unsqueeze(0)
@@ -227,6 +227,9 @@ def main() -> None:
         min_height = max_height = float(robot.data.root_pos_w[0, 2].item())
         terminated_steps = 0
         start_x = float(robot.data.root_pos_w[0, 0].item())
+        start_quat = robot.data.root_quat_w[0].detach().cpu().numpy()
+        start_yaw = float(np.arctan2(2.0 * (start_quat[0] * start_quat[3] + start_quat[1] * start_quat[2]), 1.0 - 2.0 * (start_quat[2] ** 2 + start_quat[3] ** 2)))
+        yaw_delta = 0.0
         with h5py.File(path, "w") as h5:
             obs = h5.create_group("observation")
             front_ds = obs.create_dataset("front_rgb", (args.steps, args.image_height, args.image_width, 3), dtype="u1", compression="lzf")
@@ -264,16 +267,39 @@ def main() -> None:
                 terminated = int(height < 0.45 or gravity_z > -0.5)
                 done_ds[step] = terminated
                 terminated_steps += terminated
-            h5.attrs["x_displacement"] = float(robot.data.root_pos_w[0, 0].item()) - start_x
+                quat = robot.data.root_quat_w[0].detach().cpu().numpy()
+                current_yaw = float(np.arctan2(2.0 * (quat[0] * quat[3] + quat[1] * quat[2]), 1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2)))
+                yaw_delta = float(np.arctan2(np.sin(current_yaw - start_yaw), np.cos(current_yaw - start_yaw)))
+            displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
+            stable = terminated_steps == 0 and min_height >= 0.45
+            if abs(args.command_x) >= 0.05:
+                command_ok = args.command_x * displacement > 0.5
+            elif abs(args.command_yaw) >= 0.05:
+                command_ok = args.command_yaw * yaw_delta > 0.25 and abs(displacement) < 2.0
+            else:
+                command_ok = True
+            success = bool(stable and command_ok)
+            h5.attrs["x_displacement"] = displacement
+            h5.attrs["yaw_delta"] = yaw_delta
             h5.attrs["min_root_height"] = min_height
             h5.attrs["max_root_height"] = max_height
             h5.attrs["terminated_steps"] = terminated_steps
-            h5.attrs["success"] = bool(terminated_steps == 0 and min_height >= 0.45)
+            h5.attrs["command_ok"] = command_ok
+            h5.attrs["success"] = success
         video.release()
+        displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
+        stable = terminated_steps == 0 and min_height >= 0.45
+        if abs(args.command_x) >= 0.05:
+            command_ok = args.command_x * displacement > 0.5
+        elif abs(args.command_yaw) >= 0.05:
+            command_ok = args.command_yaw * yaw_delta > 0.25 and abs(displacement) < 2.0
+        else:
+            command_ok = True
+        success = bool(stable and command_ok)
         print(
-            f"[M20PRO-NATIVE-EXPERT] episode={episode} x_displacement={float(robot.data.root_pos_w[0, 0].item()) - start_x:.4f} m "
-            f"min_root_height={min_height:.4f} m terminated_steps={terminated_steps} "
-            f"success={terminated_steps == 0 and min_height >= 0.45} data={path} video={video_path}",
+            f"[M20PRO-NATIVE-EXPERT] episode={episode} x_displacement={displacement:.4f} m yaw_delta={yaw_delta:.4f} rad "
+            f"min_root_height={min_height:.4f} m terminated_steps={terminated_steps} command_ok={command_ok} "
+            f"success={success} data={path} video={video_path}",
             flush=True,
         )
     scene.reset()
