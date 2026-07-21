@@ -41,6 +41,7 @@ enable_extension("isaacsim.asset.importer.mjcf")
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.sim.converters import MjcfConverter, MjcfConverterCfg  # noqa: E402
+from pxr import Sdf, Usd  # noqa: E402
 
 
 def main() -> None:
@@ -56,6 +57,19 @@ def main() -> None:
         make_instanceable=False,
     )
     converter = MjcfConverter(cfg)
+    stage = Usd.Stage.Open(converter.usd_path)
+    world_body = stage.GetDefaultPrim().GetPath().AppendChild("worldBody")
+    if stage.GetPrimAtPath(world_body).IsValid():
+        # MJCF's world container is imported as a second articulation root;
+        # the Isaac scene already supplies its ground and lighting.
+        source_layers = {spec.layer.identifier for spec in stage.GetPrimAtPath(world_body).GetPrimStack()}
+        for identifier in source_layers:
+            layer = Sdf.Layer.FindOrOpen(identifier)
+            prim_spec = layer.GetPrimAtPath(world_body) if layer is not None else None
+            if prim_spec is not None:
+                del prim_spec.nameParent.nameChildren[prim_spec.name]
+                layer.Save()
+        print(f"[M20PRO-MJCF] removed_world_body={world_body}", flush=True)
     print(f"[M20PRO-MJCF] input={args.input}", flush=True)
     print(f"[M20PRO-MJCF] output={converter.usd_path}", flush=True)
 

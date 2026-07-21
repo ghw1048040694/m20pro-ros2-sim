@@ -176,7 +176,10 @@ Last updated: 2026-07-22 CST
 - 直接轮速 pattern（幅值 `1.0/0.5/0.25`）全部出现塌机身，最低根高约 `0.24–0.39 m`，不作为低层控制器。
 - 目标 `(3,-1)` 的失败验收记录：旧 override 在进入 `0.8 m` 后又滑到 `1.874 m`、末速度 `0.612 m/s`；连续闭环 v1 末距 `1.109 m` 且 `yaw_delta=0.033 rad`；滑移增益 v2 把目标转到错误的 `y=+0.791 m`；修正符号 v3 仍末距 `1.044 m` 且几乎不转。公开 `cmd_vel` 通道的 combined yaw 末 `yaw_delta=-0.006 rad`，纯 yaw `0.05` 也只有 `0.0015 rad`。这些 HDF5/MP4 已清理，全部 `success=false`，没有进入训练集。
 - 对照官方 `AI-DA-STC/M20-autonomy-sim`：ONNX 的 MuJoCo `M20.xml` 使用不同的 link 惯量和 `friction="1 0.01 0.001"` 接触模型；当前 URDF→USD 只保留简化碰撞和各向同性 PhysX 摩擦，动力学并不等价。官方 Gazebo 控制桥的轮子 `Kd=0.6`，launch 默认把 wheel Kd scale 设为 `1.0`；此前为 yaw 临时放大的 `3.6` 已确认会造成角速度尖峰。
-- 新增 [convert_m20_mjcf.py](scripts/convert_m20_mjcf.py) / [convert_m20_mjcf.sh](scripts/convert_m20_mjcf.sh)，显式启用 Isaac Sim 5.1 的 MJCF importer；`assets/m20_mjcf_official_nofloor_v2.usd` 已在 2 TB 盘生成。它能生成完整机器人接触层，但候选在当前 Articulation 回放阶段尚未通过稳定验收，不能替换默认资产或宣称修复完成。
+- 新增 [convert_m20_mjcf.py](scripts/convert_m20_mjcf.py) / [convert_m20_mjcf.sh](scripts/convert_m20_mjcf.sh)，显式启用 Isaac Sim 5.1 的 MJCF importer，并删除 importer 生成的第二 articulation root `/M20/worldBody`；`assets/m20_mjcf_official_nofloor_v6.usd` 已在 2 TB 盘生成。它通过了 `17 bodies / 16 joints` 和 240 步静态 smoke（最终根高约 `0.560 m`），但尚未替换默认资产。
+- candidate 前进回放：150 步位移 `4.389 m`、最低根高 `0.5151 m`、最大角速度 `0.1571 rad/s`，带 MP4 保存在 `videos/public_m20_mjcf_forward_v2/`。
+- candidate 转向回放：`wheel Kd=0.2`、正 yaw `0.5` 得到 `yaw_delta=+0.3846 rad`、最大角速度 `0.5406 rad/s`；负 yaw `-0.3` 只有 `-0.0459 rad`，负 yaw `-0.5` 在 Kd `0.6` 下为 `-0.1325 rad`。这表明当前转换资产/公开网络仍有单向转向不对称，不能直接作为任意方位导航专家。
+- candidate recorder 已根据 `M20PRO_USD_PATH` 自动把相机/LiDAR 挂到 `base_link/base_link`；固定负转向 300 步后前进的目标串联仍 `success=false`（最终距目标 `2.823 m`、路径 `10.491 m`），失败 HDF5/MP4 已删除。
 - 当前决策：暂停随机方位专家采集和 VLA 继续训练；先让官方 MJCF robot-only USD 通过拓扑、直行、转向三项带视频回归，再采集成功的随机目标轨迹。跳跃仍需独立的落地控制器，不能用当前 rolling policy 代替。
 
 ### Jump 专家搜索边界（2026-07-22）
@@ -206,9 +209,9 @@ TERM=xterm python scripts/check_m20pro_task.py --headless
 
 ```bash
 ./scripts/convert_m20_mjcf.sh \
-  --output /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v2.usd
+  --output /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v6.usd
 
-M20PRO_USD_PATH=/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v2.usd \
+M20PRO_USD_PATH=/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v6.usd \
   ./scripts/test_m20pro_asset.sh --steps 240
 ```
 

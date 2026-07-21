@@ -131,6 +131,7 @@ DEFAULT_POLICY_POSE = torch.tensor(
 )
 LEG_ACTION_SCALE = torch.tensor([0.125, 0.25, 0.25] * 4, dtype=torch.float32)
 WHEEL_DAMPING = args.wheel_damping if args.wheel_damping is not None else (3.6 if abs(args.command_yaw) >= 0.05 else 0.6)
+SENSOR_LINK = "base_link/base_link" if "m20_mjcf" in str(os.environ.get("M20PRO_USD_PATH", "")) else "base_link"
 
 PUBLIC_M20_CFG = M20PRO_CFG.replace(
     init_state=M20PRO_CFG.init_state.replace(
@@ -176,21 +177,21 @@ class NativeM20SceneCfg(InteractiveSceneCfg):
         else None
     )
     front_camera = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base_link/front_camera", update_period=0.02,
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}/front_camera", update_period=0.02,
         height=args.image_height, width=args.image_width, data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955,
                                          clipping_range=(0.05, 100.0)),
         offset=CameraCfg.OffsetCfg(pos=(0.38, 0.0, 0.12), convention="world"),
     )
     rear_camera = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base_link/rear_camera", update_period=0.02,
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}/rear_camera", update_period=0.02,
         height=args.image_height, width=args.image_width, data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955,
                                          clipping_range=(0.05, 100.0)),
         offset=CameraCfg.OffsetCfg(pos=(-0.38, 0.0, 0.12), convention="world"),
     )
     lidar = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base_link", update_period=0.02, ray_alignment="base",
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}", update_period=0.02, ray_alignment="base",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.16)),
         pattern_cfg=patterns.LidarPatternCfg(channels=1, vertical_fov_range=(0.0, 0.0),
                                               horizontal_fov_range=(-180.0, 180.0), horizontal_res=5.0),
@@ -297,7 +298,7 @@ def set_navigation_wheel_damping(
     else:
         # Keep the released controller's wheel Kd. The earlier yaw-only 3.6
         # override created a large angular-velocity spike in Isaac PhysX.
-        damping = WHEEL_DAMPING
+        damping = args.stop_wheel_damping if target_reached else WHEEL_DAMPING
     wheel_actuator.damping.fill_(damping)
 
 

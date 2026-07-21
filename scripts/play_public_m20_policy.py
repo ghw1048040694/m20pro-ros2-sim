@@ -242,6 +242,16 @@ def make_observation(
     return observation
 
 
+def yaw_from_quaternion(quat: torch.Tensor) -> float:
+    values = quat.detach().cpu().numpy()
+    return float(
+        np.arctan2(
+            2.0 * (values[0] * values[3] + values[1] * values[2]),
+            1.0 - 2.0 * (values[2] ** 2 + values[3] ** 2),
+        )
+    )
+
+
 def main() -> None:
     device = args.device or "cuda:0"
     args.video_dir.mkdir(parents=True, exist_ok=True)
@@ -300,6 +310,8 @@ def main() -> None:
 
     last_action = torch.zeros((1, 16), device=robot.device)
     start_x = float(robot.data.root_pos_w[0, 0].item())
+    start_yaw = yaw_from_quaternion(robot.data.root_quat_w[0])
+    yaw_delta = 0.0
     min_height = max_height = float(robot.data.root_pos_w[0, 2].item())
     forward_velocity_sum = 0.0
     leg_action_sum = 0.0
@@ -352,6 +364,11 @@ def main() -> None:
                 max_abs_angular_velocity,
                 float(robot.data.root_ang_vel_b[0].abs().max().item()),
             )
+            current_yaw = yaw_from_quaternion(robot.data.root_quat_w[0])
+            yaw_delta = float(np.arctan2(
+                np.sin(current_yaw - start_yaw),
+                np.cos(current_yaw - start_yaw),
+            ))
             gravity_z = float(
                 quat_apply_inverse(
                     robot.data.root_quat_w,
@@ -369,6 +386,7 @@ def main() -> None:
         flush=True,
     )
     print(f"[M20PRO-NATIVE-PLAY] steps={args.steps} x_displacement={displacement:.4f} m", flush=True)
+    print(f"[M20PRO-NATIVE-PLAY] yaw_delta={yaw_delta:.4f} rad", flush=True)
     print(
         f"[M20PRO-NATIVE-PLAY] mean_forward_speed={forward_velocity_sum / args.steps:.4f} m/s",
         flush=True,
