@@ -20,14 +20,19 @@ class M20ProLocomotionEnv(LocomotionEnv):
         velocity_error = torch.square(self.vel_loc[:, 0] - self.cfg.target_forward_velocity)
         forward_tracking = torch.exp(-velocity_error / 0.25)
         upright = torch.clamp((self.up_proj - 0.8) / 0.2, min=0.0, max=1.0)
+        height_error = torch.square(self.torso_position[:, 2] - self.cfg.target_base_height)
+        height_tracking = torch.exp(-height_error / 0.0025)
+        leg_posture_cost = torch.sum(torch.square(self.dof_pos[:, :12]), dim=-1)
         lateral_velocity = torch.square(self.vel_loc[:, 1])
         vertical_velocity = torch.square(self.vel_loc[:, 2])
         angular_velocity = torch.sum(torch.square(self.angvel_loc), dim=-1)
         action_cost = torch.sum(torch.square(self.actions), dim=-1)
         reward = (
             2.0 * forward_tracking
+            + 1.0 * height_tracking
             + 0.5 * upright
             + 0.05
+            - 0.20 * leg_posture_cost
             - 0.10 * lateral_velocity
             - 0.20 * vertical_velocity
             - 0.02 * angular_velocity

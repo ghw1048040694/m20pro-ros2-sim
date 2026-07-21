@@ -53,6 +53,11 @@ try:
     done_count = torch.zeros(args.num_envs, dtype=torch.int32, device=env.unwrapped.device)
     integrated_x = torch.zeros(args.num_envs, device=env.unwrapped.device)
     action_magnitude = torch.zeros(args.num_envs, device=env.unwrapped.device)
+    leg_action_magnitude = torch.zeros(args.num_envs, device=env.unwrapped.device)
+    wheel_action_magnitude = torch.zeros(args.num_envs, device=env.unwrapped.device)
+    leg_velocity_magnitude = torch.zeros(args.num_envs, device=env.unwrapped.device)
+    wheel_velocity_magnitude = torch.zeros(args.num_envs, device=env.unwrapped.device)
+    leg_position_sum = torch.zeros((args.num_envs, 12), device=env.unwrapped.device)
     step_dt = env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation
     for _ in range(args.steps):
         with torch.inference_mode():
@@ -64,6 +69,11 @@ try:
         done_count += dones.to(torch.int32)
         integrated_x += forward_velocity * step_dt
         action_magnitude += torch.mean(torch.abs(actions), dim=-1)
+        leg_action_magnitude += torch.mean(torch.abs(actions[:, :12]), dim=-1)
+        wheel_action_magnitude += torch.mean(torch.abs(actions[:, 12:]), dim=-1)
+        leg_velocity_magnitude += torch.mean(torch.abs(env.unwrapped.robot.data.joint_vel[:, :12]), dim=-1)
+        wheel_velocity_magnitude += torch.mean(torch.abs(env.unwrapped.robot.data.joint_vel[:, 12:]), dim=-1)
+        leg_position_sum += env.unwrapped.robot.data.joint_pos[:, :12]
     print(f"[M20PRO-PLAY] checkpoint={args.checkpoint}", flush=True)
     print(f"[M20PRO-PLAY] integrated_forward_distance={integrated_x.mean().item():.4f} m", flush=True)
     print(
@@ -73,6 +83,19 @@ try:
     print(f"[M20PRO-PLAY] min_root_height={min_height.min().item():.4f} m", flush=True)
     print(f"[M20PRO-PLAY] done_count={int(done_count.sum())}", flush=True)
     print(f"[M20PRO-PLAY] mean_abs_action={(action_magnitude / args.steps).mean().item():.4f}", flush=True)
+    print(f"[M20PRO-PLAY] mean_abs_leg_action={(leg_action_magnitude / args.steps).mean().item():.4f}", flush=True)
+    print(f"[M20PRO-PLAY] mean_abs_wheel_action={(wheel_action_magnitude / args.steps).mean().item():.4f}", flush=True)
+    print(
+        f"[M20PRO-PLAY] mean_abs_leg_velocity={(leg_velocity_magnitude / args.steps).mean().item():.4f} rad/s",
+        flush=True,
+    )
+    mean_wheel_velocity = (wheel_velocity_magnitude / args.steps).mean()
+    print(f"[M20PRO-PLAY] mean_abs_wheel_velocity={mean_wheel_velocity.item():.4f} rad/s", flush=True)
+    print(f"[M20PRO-PLAY] wheel_surface_speed={0.09 * mean_wheel_velocity.item():.4f} m/s", flush=True)
+    print(
+        f"[M20PRO-PLAY] mean_leg_joint_positions={(leg_position_sum / args.steps).mean(dim=0).tolist()}",
+        flush=True,
+    )
 finally:
     if env is not None:
         env.close()

@@ -57,5 +57,6 @@ class M20ProLocomotionEnvCfg(DirectRLEnvCfg):
     death_cost = -2.0
     alive_reward_scale = 0.2
     angular_velocity_scale = 0.25
-    termination_height = 0.35
+    termination_height = 0.45
     target_forward_velocity = 1.0
+    target_base_height = 0.59
