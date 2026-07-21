@@ -133,6 +133,7 @@ Last updated: 2026-07-22 CST
 - 近景复核视频：`videos/public_m20_native_close_v1/m20-native-x+0.50-y+0.00-yaw+0.00-step-0.mp4`，250 步得到 `x_displacement=7.3376 m`、`mean_forward_speed=0.3678 m/s`、`min_root_height=0.5154 m`、`terminated_steps=0`。
 - 新增 [play_public_m20_policy.py](scripts/play_public_m20_policy.py) / `play_public_m20_policy.sh`，每次回放强制带 `--video`；新增 [record_public_m20_expert.py](scripts/record_public_m20_expert.py) / `record_public_m20_expert.sh`，记录前后 RGB、72 线 360° LiDAR、57 维原生 proprio、45 维全状态、16 维动作、command 和自然语言标签。
 - 采集器 5 步 smoke 已通过：HDF5 形状为 `front/rear=(5,96,160,3)`、`lidar=(5,72)`、`proprio=(5,57)`、`state=(5,45)`、`action=(5,16)`，`terminated_steps=0`，同步 MP4 正常写入。该 smoke 仅是格式验证，正式数据需使用完整 episode。
+- 第一批正式 rolling 数据已采集到 `datasets/public_m20_native_v1/`：4 个 episode、每条 500 帧/10 秒、每条均 `success=true`。逐文件检查结果：位移 `14.7162–14.7326 m`，最低根高 `0.5152–0.5154 m`，`terminated_steps=0`，所有 RGB/LiDAR/proprio/state/action 数值有限；对应 4 个 MP4 均为 500 帧、50 Hz、`480x288`。这批数据是后续语言条件 action-chunk BC/VLA 的 rolling 正样本，不包含 jump 标签。
 - 上游仓库未发现可供重新分发的根目录 LICENSE 文件；本项目只在本机保留来源说明和个人研究验证，不把外部源码或权重提交到仿真仓库或 VLA-Learning 仓库。
 
 当前判断：原生 M20 policy 已经是合格的 rolling 专家，但它没有跳跃能力，也没有语言、相机和 LiDAR 决策能力。因此“自然语言找物体/导航 + 1 m 障碍跳跃”仍未完成；下一步先采集多命令 rolling 正样本，再加入可物理验证的 jump skill，最后训练小型语言条件 action-chunk BC/VLA，而不是继续盲目增加 PPO 迭代。
