@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
+from isaaclab.actuators import DCMotorCfg
 from isaaclab.assets import ArticulationCfg
 
 
@@ -44,12 +44,14 @@ M20PRO_CFG = ArticulationCfg(
             damping=4.0,
             friction=0.0,
         ),
-        "wheels": ImplicitActuatorCfg(
+        "wheels": DCMotorCfg(
             joint_names_expr=[".*_wheel_joint"],
-            effort_limit_sim=21.6,
-            velocity_limit_sim=79.3,
+            effort_limit=21.6,
+            saturation_effort=21.6,
+            velocity_limit=79.3,
             stiffness=0.0,
-            damping=1.0,
+            damping=0.0,
+            friction=0.0,
         ),
     },
 )

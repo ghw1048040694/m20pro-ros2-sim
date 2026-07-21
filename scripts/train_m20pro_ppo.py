@@ -9,6 +9,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--num-envs", type=int, default=64)
 parser.add_argument("--iterations", type=int, default=2)
+parser.add_argument("--rollout-steps", type=int, default=24)
 parser.add_argument("--log-dir", type=str, default="logs/rsl_rl/m20pro_locomotion_smoke")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -31,7 +32,7 @@ try:
     env_cfg.sim.device = args.device or "cuda:0"
     agent_cfg = M20ProLocomotionPPORunnerCfg()
     agent_cfg.max_iterations = args.iterations
-    agent_cfg.num_steps_per_env = 4
+    agent_cfg.num_steps_per_env = args.rollout_steps
     agent_cfg.experiment_name = "m20pro_locomotion_smoke"
 
     env = gym.make("M20Pro-Locomotion-Flat-v0", cfg=env_cfg)
