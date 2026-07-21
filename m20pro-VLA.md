@@ -1,6 +1,6 @@
 # M20 Pro VLA 具身智能仿真项目记录
 
-Last updated: 2026-07-21 CST
+Last updated: 2026-07-22 CST
 
 ## 项目边界
 
@@ -103,6 +103,17 @@ Last updated: 2026-07-21 CST
 - 重定向第三人称视频验证结果：幅度 `1.0` 时 `min_root_height=0.2710 m`、向后 `0.6189 m`；幅度 `0.50` 时 `min=0.2997 m`、向后 `0.6470 m`；幅度 `0.35` 时 `min=0.5617 m`、位移 `+0.0070 m`；幅度 `0.25` 时 `min=0.5756 m`、位移 `+0.0016 m`。因此 `0.25–0.35` 是当前稳定但几乎不前进的安全区，Go2 足式步态不能直接成为 M20 轮腿巡航动作。
 - 对应视频均写入 `videos/m20_retarget_amp025_v0/`、`videos/m20_retarget_amp035_v0/` 和 `videos/m20_retarget_amp050_v0/`，回放器为 `scripts/play_m20_retargeted.sh`；这些 MP4 是校准证据，不是最终 VLA 成果。
 - 本轮新增的 M20 传感器采集器 `scripts/record_m20pro_expert.sh` 已验证前后 `160x96` RGB、72 线环形 LiDAR、45 维状态和 HDF5/MP4 同步写入；其开环 jump 样本因倒地标记为诊断数据，不进入成功专家集合。
+
+### 公开 Go1 parkour 专家协议验证（2026-07-22）
+
+- 找到并整理了 Robot Parkour Learning（CoRL 2023，MIT）公开 Go1 checkpoint：`public_experts/parkour_go1/skill/model_674000.pt`（视觉 crawl/jump/leap）和 `walk/model_107500.pt`（本体 walk）。Extreme Parkour 源码另存于 `public_experts/sources/extreme-parkour`，许可证为 CC BY-NC 4.0；本轮没有把它作为可直接下载的 checkpoint。
+- 新增 `scripts/validate_public_parkour_checkpoint.py`。它按 checkpoint 的真实协议构造 `48 维本体 + 1x48x64 深度图`，使用 `weights_only=True` 加载并验证 GRU、动作形状和记忆复位。验证结果：`observation_shape=[4,3120]`、`action_shape=[8,4,12]`、动作范围约 `[-0.8223,0.3638]`，平面/障碍深度会改变动作。
+- 新增 `scripts/play_public_go1_parkour.py` 和 `play_public_go1_parkour.sh`，原生加载 Isaac Lab Go1 USD，使用公开 `Kp=40/Kd=0.5`、0.5 action scale、前向深度预处理和第三人称 MP4。所有回放命令强制带 `--video`。
+- 公开策略在当前 Isaac Lab 5.1/2.3.2 适配器中没有形成可靠步态：skill checkpoint、0.45 m 障碍、200 步回放为 `x_displacement=-2.3574 m`、`min_root_height=0.0604 m`；无障碍仍倒地。walk checkpoint 作为无视觉对照也失败：200 步为 `x_displacement=-1.9766 m`、`min_root_height=0.0612 m`。
+- 已核对并修正过两项输入偏差：深度从米制转换为公开部署使用的 `[0,1]`（0–2 m 范围、裁剪后 resize），Go1 执行器改为显式 `Kp=40/Kd=0.5` DCMotor；修正后 walk 对照仍失败。
+- 结论：当前失败不是 M20 关节重定向，也不是“继续训练几轮”能解决的奖励问题，而是公开 IsaacGym parkour checkpoint 与 Isaac Lab USD/执行器/坐标协议尚未完成等价适配。Go1 checkpoint 不能标记为 M20 成功专家，不能直接用于 VLA 训练；当前视频属于协议诊断证据。
+
+下一步调整为：先冻结这些公开 checkpoint，优先做原始 parkour 环境的动作/坐标/PD 逐项等价测试；若无法复现原环境，再只使用公开轨迹作为离线行为克隆数据，不把异构策略硬迁移到 M20。M20-specific rolling/jump 仍需独立采集可验证专家轨迹。
 
 公开参考路线（用于数据/接口，不直接把异构机器人 checkpoint 当成 M20 策略）：
 

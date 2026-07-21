@@ -104,3 +104,29 @@ calibration pass and reports root-height/displacement diagnostics:
   --actions-h5 OUTPUT.h5 --steps 200 \
   --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_retargeted_v0
 ```
+
+Validate the released Robot Parkour Learning Go1 visual checkpoint without
+launching Isaac Sim:
+
+```bash
+python scripts/validate_public_parkour_checkpoint.py \
+  --json-output /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/public_parkour_checkpoint_validation.json
+```
+
+Replay the native Go1 public parkour policy with a mandatory third-person MP4.
+The public checkpoint was trained for roughly 0.4--0.45 m parkour obstacles;
+this command is an IsaacGym-to-IsaacLab protocol diagnostic, not an M20 policy:
+
+```bash
+./scripts/play_public_go1_parkour.sh \
+  --policy-mode skill --steps 200 --command-x -1.0 \
+  --obstacle-height 0.45 --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_parkour_go1
+```
+
+Run the non-visual Go1 walk checkpoint as a dynamics/action-protocol control:
+
+```bash
+./scripts/play_public_go1_parkour.sh \
+  --policy-mode walk --steps 200 --command-x -1.0 --obstacle-x 5.0 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_parkour_go1_walk
+```
