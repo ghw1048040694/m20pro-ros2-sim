@@ -52,6 +52,7 @@ try:
     policy = runner.get_inference_policy(device=env.unwrapped.device)
     observations = env.get_observations()
     min_height = env.unwrapped.robot.data.root_pos_w[:, 2].clone()
+    max_height = env.unwrapped.robot.data.root_pos_w[:, 2].clone()
     done_count = torch.zeros(args.num_envs, dtype=torch.int32, device=env.unwrapped.device)
     integrated_x = torch.zeros(args.num_envs, device=env.unwrapped.device)
     action_magnitude = torch.zeros(args.num_envs, device=env.unwrapped.device)
@@ -68,6 +69,7 @@ try:
         root_pos = env.unwrapped.robot.data.root_pos_w
         forward_velocity = env.unwrapped.robot.data.root_lin_vel_b[:, 0]
         min_height = torch.minimum(min_height, root_pos[:, 2])
+        max_height = torch.maximum(max_height, root_pos[:, 2])
         done_count += dones.to(torch.int32)
         integrated_x += forward_velocity * step_dt
         action_magnitude += torch.mean(torch.abs(actions), dim=-1)
@@ -84,6 +86,7 @@ try:
         flush=True,
     )
     print(f"[M20PRO-PLAY] min_root_height={min_height.min().item():.4f} m", flush=True)
+    print(f"[M20PRO-PLAY] max_root_height={max_height.max().item():.4f} m", flush=True)
     print(f"[M20PRO-PLAY] done_count={int(done_count.sum())}", flush=True)
     print(f"[M20PRO-PLAY] mean_abs_action={(action_magnitude / args.steps).mean().item():.4f}", flush=True)
     print(f"[M20PRO-PLAY] mean_abs_leg_action={(leg_action_magnitude / args.steps).mean().item():.4f}", flush=True)

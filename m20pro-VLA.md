@@ -81,6 +81,8 @@ Last updated: 2026-07-21 CST
 - jump v3 加入 57 维 phase 观测（下蹲、起跳、腾空三阶段），并将 episode 缩短到 2 s 以增强时序学习。新版已通过 4 环境 × 24 步 smoke，但尚未重新训练；旧 jump checkpoint 与 57 维观测不兼容。
 - jump v3 重训后仍不起跳：200 步回放最低高度 `0.5158 m`，说明纯力矩探索仍很难学会协调伸腿。
 - 跳跃控制进一步改为 12 维目标关节姿态 + 物理 PD，轮关节使用高刚度位置锁定。开环“收腿 → 伸腿”探针已达到 `max_root_height=0.8223 m`，高于 0.80 m 目标，证明 USD 模型的跳跃动力学可行。下一步是在这个操作空间重训 jump v4。
+- jump v4 重训仍然没有学到时序：200 步回放最低高度 `0.4178 m`、`done_count=32`，但开环探针已证明 PD 目标姿态可以跳。
+- 已加入 jump v5 reference bootstrap 奖励：phase 前 30% 学习收腿目标，中间阶段学习伸腿目标，同时保留高度、上向速度和腾空奖励。这是用已验证的开环序列帮助 PPO 先学会可行跳跃时序，后续再降低 reference 权重。
 - 已记录 PPO 指标含义：`Loss/value_function` 是 critic 价值回归误差，`Loss/surrogate` 是 PPO 裁剪策略损失，`Policy/mean_noise_std` 是 actor 输出动作分布的平均探索标准差。
 
 ## 常用验证

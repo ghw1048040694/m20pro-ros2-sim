@@ -25,6 +25,12 @@ class M20ProJumpEnv(M20ProLocomotionEnv):
         self._compute_intermediate_values()
         base_height = self.torso_position[:, 2]
         phase = self.episode_length_buf / self.max_episode_length
+        reference_actions = torch.zeros_like(self.actions)
+        reference_actions[:, 4:12] = torch.where(
+            (phase < 0.30).unsqueeze(-1),
+            torch.ones_like(reference_actions[:, 4:12]),
+            -torch.ones_like(reference_actions[:, 4:12]),
+        )
         previous_max = self.max_base_height.clone()
         self.max_base_height = torch.maximum(self.max_base_height, base_height)
         jump_progress = torch.clamp((self.max_base_height - self.cfg.initial_base_height) / 0.30, 0.0, 1.0)
@@ -34,6 +40,7 @@ class M20ProJumpEnv(M20ProLocomotionEnv):
         upright = torch.clamp((self.up_proj - 0.75) / 0.25, min=0.0, max=1.0)
         leg_posture_cost = torch.sum(torch.square(self.dof_pos[:, :12]), dim=-1)
         leg_action_cost = torch.sum(torch.square(self.actions), dim=-1)
+        reference_error = torch.mean(torch.square(self.actions - reference_actions), dim=-1)
         progress_reward = self.max_base_height - previous_max
         squat_phase = (phase < 0.30).to(torch.float32)
         takeoff_phase = ((phase >= 0.30) & (phase < 0.55)).to(torch.float32)
@@ -45,6 +52,7 @@ class M20ProJumpEnv(M20ProLocomotionEnv):
             + 2.0 * flight_phase * height_tracking
             + 8.0 * takeoff_phase * progress_reward
             + 0.5 * upright
+            + 2.0 * torch.exp(-reference_error / 0.25)
             - 0.02 * leg_posture_cost
             - 0.005 * leg_action_cost
         )
