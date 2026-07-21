@@ -48,6 +48,7 @@ dddmr_navigation/
 /outputs/
 /wandb/
 /logs/
+/videos/
 /assets/m20pro/*.usd
 /assets/m20pro/.asset_hash
 /assets/m20pro/config.yaml

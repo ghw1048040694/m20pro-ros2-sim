@@ -56,6 +56,7 @@ Last updated: 2026-07-21 CST
 - 针对奖励漏洞完成第二版环境：改用 1 m/s 前向速度指数跟踪奖励，降低静止存活奖励，增加侧向/垂向/角速度和动作代价。轮关节改为显式 DC motor 力矩执行器，PPO rollout 由 smoke 的 4 步恢复到 24 步，初始探索噪声由 1.0 降到 0.5。
 - 新环境已通过 4 环境 × 24 步 smoke：`obs=(4, 60)`、`reward_mean=0.5866`、`terminated=0`。
 - v2 `model_299.pt` 旧回放统计曾报告位移仅 `0.0010 m`，但该统计只计算最终世界坐标减初始坐标，且没有正确累计 done，不能用于自动 reset 环境。修正为速度积分和真实 done 计数后，4 环境 × 200 步结果为：平均积分前进 `3.7245 m`、平均前向速度 `0.9311 m/s`、最低根高度 `0.3546 m`、`done_count=0`、平均绝对动作 `0.6841`。策略已学会接近 1 m/s 目标的前进，但根高度距 0.35 m 终止阈值仅约 4.6 mm，需增加姿态/高度裕量。
+- 回放脚本新增 `--video`，可使用 headless rendering 录制单环境 MP4，避免有头 Isaac Sim GUI 的持续开销。已生成 `videos/m20pro_locomotion_v2/model_299-step-0.mp4`（400 步，473833 bytes）；`videos/` 为本地产物，不提交 Git。
 - 已记录 PPO 指标含义：`Loss/value_function` 是 critic 价值回归误差，`Loss/surrogate` 是 PPO 裁剪策略损失，`Policy/mean_noise_std` 是 actor 输出动作分布的平均探索标准差。
 
 ## 常用验证

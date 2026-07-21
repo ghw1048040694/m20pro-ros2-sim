@@ -10,8 +10,12 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument("--steps", type=int, default=500)
+parser.add_argument("--video", action="store_true", help="Record an MP4 while replaying.")
+parser.add_argument("--video-dir", default="videos/m20pro_ppo", help="Video output directory.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+if args.video:
+    args.enable_cameras = True
 
 app = AppLauncher(args).app
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,7 +34,16 @@ try:
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.sim.device = args.device or "cuda:0"
     agent_cfg = M20ProLocomotionPPORunnerCfg()
-    env = gym.make("M20Pro-Locomotion-Flat-v0", cfg=env_cfg)
+    env = gym.make("M20Pro-Locomotion-Flat-v0", cfg=env_cfg, render_mode="rgb_array" if args.video else None)
+    if args.video:
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_folder=args.video_dir,
+            step_trigger=lambda step: step == 0,
+            video_length=args.steps,
+            name_prefix=Path(args.checkpoint).stem,
+            disable_logger=True,
+        )
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=str(Path(args.checkpoint).parent), device=agent_cfg.device)
     runner.load(args.checkpoint)

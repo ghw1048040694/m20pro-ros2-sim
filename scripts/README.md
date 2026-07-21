@@ -48,3 +48,12 @@ Run the first real environment reset/step smoke test:
 ```bash
 ./scripts/smoke_m20pro_locomotion.sh --num-envs 1 --steps 4
 ```
+
+Record a trained policy without opening the Isaac Sim GUI:
+
+```bash
+./scripts/play_m20pro_ppo.sh \
+  --checkpoint logs/rsl_rl/m20pro_locomotion_v2/model_299.pt \
+  --num-envs 1 --steps 400 --video \
+  --video-dir videos/m20pro_locomotion_v2
+```
