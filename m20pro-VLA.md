@@ -127,14 +127,14 @@ Last updated: 2026-07-22 CST
 ### 原生 M20 专家协议与首次有效回放（2026-07-22）
 
 - 在 GitHub 仓库 [AI-DA-STC/M20-autonomy-sim](https://github.com/AI-DA-STC/M20-autonomy-sim) 中找到原生 M20 `policy.onnx`。模型输入为 `obs[1,57]`，输出为 `actions[1,16]`；当前 Conda 环境已安装 `onnxruntime==1.27.0`，CPU 推理足够支撑单环境 50 Hz。
-- 官方观测顺序为 `base_omega*0.25(3) + projected_gravity(3) + command(3) + joint_pos-default(16) + joint_vel*0.05(16) + last_action(16)`。动作顺序是 12 个腿关节后接 4 个轮关节，腿缩放 `[0.125,0.25,0.25]`、轮速度缩放 `5.0`，PD 为腿 `Kp=80/Kd=2`、轮 `Kd=0.6`。
+- 官方观测顺序为 `base_omega*0.25(3) + projected_gravity(3) + command(3) + joint_pos-default(16) + joint_vel*0.05(16) + last_action(16)`。动作顺序是 12 个腿关节后接 4 个轮关节，腿缩放 `[0.125,0.25,0.25]`、轮速度缩放 `5.0`，官方策略协议的轮 `Kd=0.6`；Isaac Lab 适配器默认平移使用 `Kd=0.6`，转向命令自动使用 Gazebo bridge `wheel_kd_scale=6.0` 对应的 `Kd=3.6`，腿仍为 `Kp=80/Kd=2`。
 - 官方 M20 的后腿髋/膝姿态必须镜像：默认策略姿态为 `FL/FR=[0,-0.6,1.0]`、`HL/HR=[0,0.6,-1.0]`。此前开环 jump 和 Go2 重定向把后腿符号处理错，导致“平移、僵硬、倒地”的错误现象；新适配器严格按官方 policy order 和 USD joint order 验证。
 - 原生 rolling 回放（第三人称 MP4）结果：`500` 个策略步、命令 `[0.5,0,0]`，`x_displacement=14.7179 m`，`mean_forward_speed=0.3684 m/s`，`min_root_height=0.5154 m`，`max_root_height=0.5295 m`，`terminated_steps=0`。这证明 M20 USD、轮执行器和关节协议已经能产生持续滚动；腿保持支撑姿态是该 rolling policy 的预期行为，不应再把“腿不摆”当作平地轮式专家失败。
 - 近景复核视频：`videos/public_m20_native_close_v1/m20-native-x+0.50-y+0.00-yaw+0.00-step-0.mp4`，250 步得到 `x_displacement=7.3376 m`、`mean_forward_speed=0.3678 m/s`、`min_root_height=0.5154 m`、`terminated_steps=0`。
 - 新增 [play_public_m20_policy.py](scripts/play_public_m20_policy.py) / `play_public_m20_policy.sh`，每次回放强制带 `--video`；新增 [record_public_m20_expert.py](scripts/record_public_m20_expert.py) / `record_public_m20_expert.sh`，记录前后 RGB、72 线 360° LiDAR、57 维原生 proprio、45 维全状态、16 维动作、command 和自然语言标签。
 - 采集器 5 步 smoke 已通过：HDF5 形状为 `front/rear=(5,96,160,3)`、`lidar=(5,72)`、`proprio=(5,57)`、`state=(5,45)`、`action=(5,16)`，`terminated_steps=0`，同步 MP4 正常写入。该 smoke 仅是格式验证，正式数据需使用完整 episode。
 - 第一批正式 rolling 数据已采集到 `datasets/public_m20_native_v1/`：4 个 episode、每条 500 帧/10 秒、每条均 `success=true`。逐文件检查结果：位移 `14.7162–14.7326 m`，最低根高 `0.5152–0.5154 m`，`terminated_steps=0`，所有 RGB/LiDAR/proprio/state/action 数值有限；对应 4 个 MP4 均为 500 帧、50 Hz、`480x288`。这批数据是后续语言条件 action-chunk BC/VLA 的 rolling 正样本，不包含 jump 标签。
-- 额外命令覆盖结果：`向后走`（`command_x=-0.5`）250 步保持稳定，`x_displacement=-6.3242 m`、`min_root_height=0.5152 m`、`terminated_steps=0`，可作为反向 rolling 正样本；`向左转`（`command_yaw=0.5`）虽未跌倒但产生 `yaw_delta=1.4632 rad` 同时 `x=-4.9744 m/y=-4.0087 m` 漂移，已标记 `success=false` 诊断数据，不进入训练集。
+- 额外命令覆盖结果：`向后走`（`command_x=-0.5`、`Kd=0.6`）250 步保持稳定，`x_displacement=-6.3242 m`、`min_root_height=0.5152 m`、`terminated_steps=0`，可作为反向 rolling 正样本；旧 `Kd=0.6` 的 `向左转` 产生 `yaw_delta=1.4632 rad` 同时 `x=-4.9744 m/y=-4.0087 m` 漂移，已标记 `success=false`。转向使用 `Kd=3.6` 后，250 步为 `yaw_delta=0.6105 rad`、`x=-1.3562 m`、`y=-0.3536 m`、`min_root_height=0.5168 m`、`success=true`；统一 `Kd=3.6` 的 forward 对照反而倒退 `x=-1.3055 m`，因此代码采用按 command 自适应，不覆盖已验证的平移数据。
 - 采集器已加入命令有效性判据：有 forward command 必须位移方向正确；有 yaw command 除转向方向外还要求平移漂移小于 2 m。仅“不跌倒”不再自动算成功。
 - 上游仓库未发现可供重新分发的根目录 LICENSE 文件；本项目只在本机保留来源说明和个人研究验证，不把外部源码或权重提交到仿真仓库或 VLA-Learning 仓库。
 

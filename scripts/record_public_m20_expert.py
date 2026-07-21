@@ -36,6 +36,7 @@ parser.add_argument("--warmup-steps", type=int, default=75)
 parser.add_argument("--command-x", type=float, default=0.5)
 parser.add_argument("--command-y", type=float, default=0.0)
 parser.add_argument("--command-yaw", type=float, default=0.0)
+parser.add_argument("--wheel-damping", type=float, default=None, help="Isaac-only wheel Kd override; default adapts for yaw commands.")
 parser.add_argument("--task-text", default="向前走")
 parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT / "datasets/public_m20_native_v1")
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_OUTPUT_ROOT / "videos/public_m20_native_v1")
@@ -83,6 +84,7 @@ DEFAULT_POLICY_POSE = torch.tensor(
     dtype=torch.float32,
 )
 LEG_ACTION_SCALE = torch.tensor([0.125, 0.25, 0.25] * 4, dtype=torch.float32)
+WHEEL_DAMPING = args.wheel_damping if args.wheel_damping is not None else (3.6 if abs(args.command_yaw) >= 0.05 else 0.6)
 
 PUBLIC_M20_CFG = M20PRO_CFG.replace(
     init_state=M20PRO_CFG.init_state.replace(
@@ -101,7 +103,7 @@ PUBLIC_M20_CFG = M20PRO_CFG.replace(
         ),
         "wheels": DCMotorCfg(
             joint_names_expr=[".*_wheel_joint"], effort_limit=21.6, saturation_effort=21.6,
-            velocity_limit=79.3, stiffness=0.0, damping=0.6,
+            velocity_limit=79.3, stiffness=0.0, damping=WHEEL_DAMPING,
         ),
     },
 )
@@ -197,7 +199,7 @@ def main() -> None:
     metadata = {
         "format": "m20pro_native_expert_hdf5_v1", "expert": "AI-DA-STC/M20-autonomy-sim policy.onnx",
         "policy_protocol": "57 observation -> 16 action; official M20PolicyRunner; no PPO reward",
-        "task_text": args.task_text, "command": [args.command_x, args.command_y, args.command_yaw],
+        "task_text": args.task_text, "command": [args.command_x, args.command_y, args.command_yaw], "wheel_damping": WHEEL_DAMPING,
         "control_hz": 50.0, "joint_names": POLICY_JOINT_NAMES,
         "observation": {"front_rgb": [args.image_height, args.image_width, 3], "rear_rgb": [args.image_height, args.image_width, 3],
                          "lidar": [ray_count], "proprio": [57], "state": [45]},
@@ -241,6 +243,7 @@ def main() -> None:
             done_ds = h5.create_dataset("terminated", (args.steps,), dtype="u1")
             h5.attrs["task_text"] = args.task_text
             h5.attrs["command"] = np.asarray([args.command_x, args.command_y, args.command_yaw], dtype=np.float32)
+            h5.attrs["wheel_damping"] = WHEEL_DAMPING
             h5.attrs["expert"] = metadata["expert"]
             for step in range(args.steps):
                 observation = native_observation(robot, joint_ids, last_action)

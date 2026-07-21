@@ -33,6 +33,7 @@ parser.add_argument("--command-x", type=float, default=0.5)
 parser.add_argument("--command-y", type=float, default=0.0)
 parser.add_argument("--command-yaw", type=float, default=0.0)
 parser.add_argument("--initial-height", type=float, default=0.54)
+parser.add_argument("--wheel-damping", type=float, default=None, help="Isaac-only wheel Kd override; default adapts for yaw commands.")
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIR)
 parser.add_argument("--video", action="store_true", help="Required: record an inspectable third-person MP4.")
 AppLauncher.add_app_launcher_args(parser)
@@ -105,6 +106,7 @@ DEFAULT_POLICY_POSE = torch.tensor(
 )
 LEG_ACTION_SCALE = torch.tensor([0.125, 0.25, 0.25] * 4, dtype=torch.float32)
 WHEEL_ACTION_SCALE = 5.0
+WHEEL_DAMPING = args.wheel_damping if args.wheel_damping is not None else (3.6 if abs(args.command_yaw) >= 0.05 else 0.6)
 
 PUBLIC_M20_CFG = M20PRO_CFG.replace(
     init_state=M20PRO_CFG.init_state.replace(
@@ -135,7 +137,9 @@ PUBLIC_M20_CFG = M20PRO_CFG.replace(
             saturation_effort=21.6,
             velocity_limit=79.3,
             stiffness=0.0,
-            damping=0.6,
+            # Isaac's wheel dynamics need the higher bridge-equivalent gain
+            # for differential yaw; straight rolling remains stable at 0.6.
+            damping=WHEEL_DAMPING,
         ),
     },
 )
