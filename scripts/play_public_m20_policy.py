@@ -34,6 +34,14 @@ parser.add_argument("--command-y", type=float, default=0.0)
 parser.add_argument("--command-yaw", type=float, default=0.0)
 parser.add_argument("--initial-height", type=float, default=0.54)
 parser.add_argument("--wheel-damping", type=float, default=None, help="Isaac-only wheel Kd override; default adapts for yaw commands.")
+parser.add_argument(
+    "--segment",
+    action="append",
+    default=[],
+    metavar="STEPS,X,Y,YAW,KD",
+    help="Optional command segment; repeat and make step counts sum to --steps.",
+)
+parser.add_argument("--segment-blend-steps", type=int, default=0, help="Linearly blend command and Kd at segment boundaries.")
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIR)
 parser.add_argument("--video", action="store_true", help="Required: record an inspectable third-person MP4.")
 AppLauncher.add_app_launcher_args(parser)
@@ -44,6 +52,36 @@ if args.steps <= 0 or args.warmup_steps < 0:
     parser.error("--steps must be positive and --warmup-steps must be non-negative")
 if not args.policy.is_file():
     parser.error(f"M20 policy not found: {args.policy}")
+if args.segment_blend_steps < 0:
+    parser.error("--segment-blend-steps must be non-negative")
+
+
+def parse_segments(values: list[str]) -> list[tuple[int, tuple[float, float, float], float]]:
+    if not values:
+        damping = args.wheel_damping if args.wheel_damping is not None else (3.6 if abs(args.command_yaw) >= 0.05 else 0.6)
+        return [(args.steps, (args.command_x, args.command_y, args.command_yaw), damping)]
+    segments = []
+    total = 0
+    for value in values:
+        fields = value.split(",")
+        if len(fields) != 5:
+            parser.error(f"invalid --segment={value!r}; expected STEPS,X,Y,YAW,KD")
+        try:
+            count = int(fields[0])
+            command = tuple(float(item) for item in fields[1:4])
+            damping = float(fields[4])
+        except ValueError as exc:
+            parser.error(f"invalid --segment={value!r}: {exc}")
+        if count <= 0 or damping < 0.0:
+            parser.error(f"invalid --segment={value!r}; steps must be positive and Kd non-negative")
+        total += count
+        segments.append((count, command, damping))
+    if total != args.steps:
+        parser.error(f"segment step counts sum to {total}, but --steps={args.steps}")
+    return segments
+
+
+SEGMENTS = parse_segments(args.segment)
 args.enable_cameras = True
 app = AppLauncher(args).app
 
@@ -182,11 +220,12 @@ def make_observation(
     robot: Articulation,
     policy_joint_ids: list[int],
     last_action: torch.Tensor,
+    command_values: tuple[float, float, float],
 ) -> torch.Tensor:
     gravity_w = torch.tensor([[0.0, 0.0, -1.0]], device=robot.device)
     projected_gravity = quat_apply_inverse(robot.data.root_quat_w, gravity_w)
     command = torch.tensor(
-        [[args.command_x, args.command_y, args.command_yaw]],
+        [list(command_values)],
         device=robot.device,
         dtype=torch.float32,
     )
@@ -227,6 +266,21 @@ def main() -> None:
     default_pose = DEFAULT_POLICY_POSE.to(robot.device).unsqueeze(0)
     leg_scale = LEG_ACTION_SCALE.to(robot.device).unsqueeze(0)
     camera = scene["third_person"]
+    segment_ranges = []
+    cursor = 0
+    for count, command, damping in SEGMENTS:
+        segment_ranges.append((cursor, cursor + count, command, damping))
+        cursor += count
+
+    def command_for_step(step: int) -> tuple[tuple[float, float, float], float]:
+        segment_index = next(index for index, (start, end, _, _) in enumerate(segment_ranges) if start <= step < end)
+        start, _, command, damping = segment_ranges[segment_index]
+        if args.segment_blend_steps > 0 and segment_index > 0 and step < start + args.segment_blend_steps:
+            previous_command, previous_damping = segment_ranges[segment_index - 1][2:]
+            blend = min(max(float(step - start + 1) / args.segment_blend_steps, 0.0), 1.0)
+            command = tuple((1.0 - blend) * old + blend * new for old, new in zip(previous_command, command))
+            damping = (1.0 - blend) * previous_damping + blend * damping
+        return command, damping
 
     root_state = robot.data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
@@ -251,9 +305,11 @@ def main() -> None:
     leg_action_sum = 0.0
     wheel_action_sum = 0.0
     terminated_steps = 0
+    max_abs_angular_velocity = 0.0
     video_name = (
-        f"m20-native-x{args.command_x:+.2f}-y{args.command_y:+.2f}"
-        f"-yaw{args.command_yaw:+.2f}-step-0.mp4"
+        "m20-native-sequence-step-0.mp4"
+        if args.segment
+        else f"m20-native-x{args.command_x:+.2f}-y{args.command_y:+.2f}-yaw{args.command_yaw:+.2f}-step-0.mp4"
     )
     video_path = args.video_dir / video_name
     video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
@@ -261,8 +317,10 @@ def main() -> None:
         raise RuntimeError(f"Unable to open video writer: {video_path}")
 
     try:
-        for _ in range(args.steps):
-            observation = make_observation(robot, policy_joint_ids, last_action)
+        for step in range(args.steps):
+            command, damping = command_for_step(step)
+            robot.actuators["wheels"].damping.fill_(damping)
+            observation = make_observation(robot, policy_joint_ids, last_action, command)
             action_np = session.run(["actions"], {"obs": observation.detach().cpu().numpy()})[0]
             if action_np.shape != (1, 16) or not np.isfinite(action_np).all():
                 raise RuntimeError("M20 policy returned an invalid action")
@@ -290,6 +348,10 @@ def main() -> None:
             forward_velocity_sum += float(robot.data.root_lin_vel_b[0, 0].item())
             leg_action_sum += float(action[:, :12].abs().mean().item())
             wheel_action_sum += float(action[:, 12:].abs().mean().item())
+            max_abs_angular_velocity = max(
+                max_abs_angular_velocity,
+                float(robot.data.root_ang_vel_b[0].abs().max().item()),
+            )
             gravity_z = float(
                 quat_apply_inverse(
                     robot.data.root_quat_w,
@@ -303,7 +365,7 @@ def main() -> None:
     displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
     print(f"[M20PRO-NATIVE-PLAY] policy={args.policy}", flush=True)
     print(
-        f"[M20PRO-NATIVE-PLAY] command=[{args.command_x:.3f}, {args.command_y:.3f}, {args.command_yaw:.3f}]",
+        f"[M20PRO-NATIVE-PLAY] command=[{args.command_x:.3f}, {args.command_y:.3f}, {args.command_yaw:.3f}] segments={SEGMENTS}",
         flush=True,
     )
     print(f"[M20PRO-NATIVE-PLAY] steps={args.steps} x_displacement={displacement:.4f} m", flush=True)
@@ -316,6 +378,7 @@ def main() -> None:
         flush=True,
     )
     print(f"[M20PRO-NATIVE-PLAY] terminated_steps={terminated_steps}", flush=True)
+    print(f"[M20PRO-NATIVE-PLAY] max_abs_angular_velocity={max_abs_angular_velocity:.4f} rad/s", flush=True)
     print(
         f"[M20PRO-NATIVE-PLAY] mean_abs_leg_action={leg_action_sum / args.steps:.4f} "
         f"mean_abs_wheel_action={wheel_action_sum / args.steps:.4f}",

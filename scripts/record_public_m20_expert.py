@@ -46,10 +46,14 @@ parser.add_argument("--override-navigation-wheels", action="store_true", help="U
 parser.add_argument("--nav-forward-speed", type=float, default=0.5)
 parser.add_argument("--nav-heading-gain", type=float, default=1.0)
 parser.add_argument("--nav-max-yaw", type=float, default=0.5)
-parser.add_argument("--nav-turn-threshold", type=float, default=0.3)
-parser.add_argument("--nav-command-hold-steps", type=int, default=30)
+parser.add_argument("--nav-turn-threshold", type=float, default=1.57)
+parser.add_argument("--nav-command-hold-steps", type=int, default=1)
 parser.add_argument("--nav-fixed-turn-steps", type=int, default=0, help="Use a fixed turn skill before forward; zero keeps bearing control.")
-parser.add_argument("--stop-brake-steps", type=int, default=30, help="Navigation braking duration after entering the target radius.")
+parser.add_argument("--success-radius", type=float, default=0.8)
+parser.add_argument("--nav-slow-radius", type=float, default=1.8)
+parser.add_argument("--nav-wheel-acceleration", type=float, default=18.0, help="Maximum wheel-target slew rate in rad/s^2.")
+parser.add_argument("--nav-wheel-yaw-gain", type=float, default=4.0, help="Empirical skid-steer gain applied to yaw differential.")
+parser.add_argument("--stop-wheel-damping", type=float, default=3.6, help="Wheel velocity gain used after reaching a target.")
 parser.add_argument("--wheel-radius", type=float, default=0.09)
 parser.add_argument("--track-width", type=float, default=0.48)
 parser.add_argument("--episode-offset", type=int, default=0, help="First output episode index for appending scenario runs.")
@@ -74,14 +78,16 @@ if args.nav_forward_speed <= 0.0 or args.nav_heading_gain <= 0.0 or args.nav_max
     parser.error("navigation gains and speed must be positive")
 if args.wheel_radius <= 0.0 or args.track_width <= 0.0:
     parser.error("wheel geometry must be positive")
-if args.stop_brake_steps < 0:
-    parser.error("--stop-brake-steps must be non-negative")
 if args.nav_command_hold_steps <= 0:
     parser.error("--nav-command-hold-steps must be positive")
 if args.nav_turn_threshold <= 0.0:
     parser.error("--nav-turn-threshold must be positive")
 if args.nav_fixed_turn_steps < 0:
     parser.error("--nav-fixed-turn-steps must be non-negative")
+if args.success_radius <= 0.0 or args.nav_slow_radius <= args.success_radius:
+    parser.error("--nav-slow-radius must be greater than the positive --success-radius")
+if args.nav_wheel_acceleration <= 0.0 or args.nav_wheel_yaw_gain <= 0.0 or args.stop_wheel_damping <= 0.0:
+    parser.error("--nav-wheel-acceleration, --nav-wheel-yaw-gain and --stop-wheel-damping must be positive")
 if not args.policy.is_file():
     parser.error(f"M20 policy not found: {args.policy}")
 args.enable_cameras = True
@@ -238,42 +244,60 @@ def navigation_command(robot: Articulation, target_reached: bool) -> tuple[float
     target_heading = float(torch.atan2(delta[1], delta[0]).item())
     current_heading = yaw_from_quaternion(robot.data.root_quat_w[0])
     heading_error = float(np.arctan2(np.sin(target_heading - current_heading), np.cos(target_heading - current_heading)))
-    if abs(heading_error) > args.nav_turn_threshold:
-        yaw_command = float(np.clip(args.nav_heading_gain * heading_error, -args.nav_max_yaw, args.nav_max_yaw))
-        return (0.0, 0.0, yaw_command)
-    distance_scale = float(np.clip((distance - 0.8) / 0.8, 0.35, 1.0))
-    return (args.nav_forward_speed * distance_scale, 0.0, 0.0)
+    yaw_command = float(np.clip(args.nav_heading_gain * heading_error, -args.nav_max_yaw, args.nav_max_yaw))
+    remaining = max(distance - args.success_radius, 0.0)
+    slow_span = args.nav_slow_radius - args.success_radius
+    distance_scale = float(np.clip(remaining / slow_span, 0.0, 1.0))
+    heading_scale = max(float(np.cos(heading_error)), 0.0)
+    if abs(heading_error) >= args.nav_turn_threshold:
+        heading_scale = 0.0
+    return (args.nav_forward_speed * distance_scale * heading_scale, 0.0, yaw_command)
 
 
-def override_navigation_wheels(action: torch.Tensor, command: tuple[float, float, float]) -> torch.Tensor:
+def override_navigation_wheels(
+    action: torch.Tensor,
+    command: tuple[float, float, float],
+    previous_action: torch.Tensor,
+) -> torch.Tensor:
     forward, _, yaw_rate = command
     half_track = 0.5 * args.track_width
-    left_velocity = -(forward - half_track * yaw_rate) / args.wheel_radius
-    right_velocity = -(forward + half_track * yaw_rate) / args.wheel_radius
-    wheel_action = torch.tensor(
+    yaw_differential = half_track * yaw_rate * args.nav_wheel_yaw_gain
+    # M20's four wheel joints use the negative Y axis, so their signed
+    # differential is opposite to the usual planar-drive convention.
+    left_velocity = -(forward + yaw_differential) / args.wheel_radius
+    right_velocity = -(forward - yaw_differential) / args.wheel_radius
+    desired_wheel_action = torch.tensor(
         [[left_velocity, right_velocity, left_velocity, right_velocity]],
         dtype=action.dtype,
         device=action.device,
     ).div_(5.0).clamp_(-2.5, 2.5)
+    max_action_delta = args.nav_wheel_acceleration / 50.0 / 5.0
+    wheel_action = torch.clamp(
+        desired_wheel_action,
+        previous_action[:, 12:] - max_action_delta,
+        previous_action[:, 12:] + max_action_delta,
+    )
     action = action.clone()
     action[:, 12:] = wheel_action
     return action
 
 
-def braking_command(robot: Articulation) -> tuple[float, float, float]:
-    return (-0.25, 0.0, 0.0)
-
-
-def set_navigation_wheel_damping(robot: Articulation, command: tuple[float, float, float]) -> None:
+def set_navigation_wheel_damping(
+    robot: Articulation,
+    command: tuple[float, float, float],
+    target_reached: bool,
+) -> None:
     if not args.navigate_to_target:
         return
     wheel_actuator = robot.actuators.get("wheels")
     if wheel_actuator is None:
         return
     if args.override_navigation_wheels:
-        damping = 0.6
+        damping = args.stop_wheel_damping if target_reached else 0.6
     else:
-        damping = 3.6 if abs(command[2]) >= 0.05 and abs(command[0]) < 0.05 else 0.6
+        # Keep the released controller's wheel Kd. The earlier yaw-only 3.6
+        # override created a large angular-velocity spike in Isaac PhysX.
+        damping = WHEEL_DAMPING
     wheel_actuator.damping.fill_(damping)
 
 
@@ -329,8 +353,11 @@ def main() -> None:
             "forward_speed": args.nav_forward_speed, "heading_gain": args.nav_heading_gain,
             "max_yaw": args.nav_max_yaw, "turn_threshold": args.nav_turn_threshold,
             "command_hold_steps": args.nav_command_hold_steps, "fixed_turn_steps": args.nav_fixed_turn_steps,
+            "success_radius": args.success_radius, "slow_radius": args.nav_slow_radius,
+            "wheel_acceleration": args.nav_wheel_acceleration, "wheel_yaw_gain": args.nav_wheel_yaw_gain,
+            "stop_wheel_damping": args.stop_wheel_damping,
             "wheel_radius": args.wheel_radius,
-            "track_width": args.track_width, "stop_brake_steps": args.stop_brake_steps,
+            "track_width": args.track_width,
             "source": "public M20 ONNX leg policy plus target-bearing differential wheel expert",
         },
         "control_hz": 50.0, "joint_names": POLICY_JOINT_NAMES,
@@ -398,7 +425,7 @@ def main() -> None:
                 target_in_range = False
                 if TARGET_RGB is not None:
                     target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
-                    target_in_range = bool(torch.linalg.vector_norm(target_delta).item() <= 0.8)
+                    target_in_range = bool(torch.linalg.vector_norm(target_delta).item() <= args.success_radius)
                     if target_in_range and not target_reached:
                         target_reached = True
                         target_reached_step = step
@@ -413,22 +440,21 @@ def main() -> None:
                         cached_navigation_command = navigation_command(robot, target_reached)
                         navigation_command_until = step + args.nav_command_hold_steps
                     command = cached_navigation_command
-                    if target_reached and target_reached_step is not None and step - target_reached_step < args.stop_brake_steps:
-                        command = braking_command(robot)
                 else:
                     command = (0.0, 0.0, 0.0) if args.stop_on_target and target_reached else command_for_step(step)
-                set_navigation_wheel_damping(robot, command)
-                policy_command = (args.command_x, 0.0, 0.0) if args.navigate_to_target and args.override_navigation_wheels else command
+                set_navigation_wheel_damping(robot, command, target_reached)
+                policy_command = (
+                    (0.0, 0.0, 0.0) if target_reached else (args.command_x, 0.0, 0.0)
+                ) if args.navigate_to_target and args.override_navigation_wheels else command
                 observation = native_observation(robot, joint_ids, last_action, policy_command)
-                # A zero command from the native locomotion policy still
-                # produces residual wheel/posture actions.  For object
-                # reaching, the label after the stop point must be an
-                # unambiguous stationary target: default leg pose and zero
-                # wheel velocity, represented by an all-zero 16-D action.
+                # The native policy can emit residual wheel motion for a zero
+                # command.  The non-override recorder therefore labels a
+                # reached target with an all-zero action; the wheel-override
+                # recorder keeps the ONNX leg posture and slews wheel targets
+                # to zero under higher damping.
                 stop_now = (
                     (args.stop_after is not None and step >= args.stop_after)
-                    or (args.navigate_to_target and target_reached and target_reached_step is not None
-                        and step - target_reached_step >= args.stop_brake_steps)
+                    or (args.navigate_to_target and target_reached and not args.override_navigation_wheels)
                     or (args.stop_on_target and not args.navigate_to_target and target_reached)
                 )
                 if stop_now:
@@ -438,10 +464,9 @@ def main() -> None:
                     action = torch.from_numpy(action_np).to(robot.device)
                     if args.navigate_to_target and args.override_navigation_wheels:
                         if target_reached and target_reached_step is not None:
-                            action[:, :12] = 0.0
-                            action = override_navigation_wheels(action, braking_command(robot))
+                            action = override_navigation_wheels(action, (0.0, 0.0, 0.0), last_action)
                         else:
-                            action = override_navigation_wheels(action, command)
+                            action = override_navigation_wheels(action, command, last_action)
                 robot.set_joint_position_target(default_pose + action[:, :12] * leg_scale, joint_ids=leg_ids)
                 robot.set_joint_velocity_target(action[:, 12:] * 5.0, joint_ids=wheel_ids)
                 last_action = action
@@ -467,7 +492,7 @@ def main() -> None:
                     target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
                     target_distance = float(torch.linalg.vector_norm(target_delta).item())
                     min_target_distance = min(min_target_distance, target_distance)
-                    if target_distance <= 0.8 and not target_reached:
+                    if target_distance <= args.success_radius and not target_reached:
                         target_reached = True
                         target_reached_step = step
                 gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
@@ -487,7 +512,10 @@ def main() -> None:
             )
             final_planar_speed = float(torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item())
             if args.navigate_to_target:
-                command_ok = target_reached and final_target_distance is not None and final_target_distance <= 0.9 and final_planar_speed < 0.15
+                command_ok = (
+                    target_reached and final_target_distance is not None
+                    and final_target_distance <= args.success_radius + 0.1 and final_planar_speed < 0.15
+                )
             elif abs(args.command_x) >= 0.05:
                 command_ok = args.command_x * displacement > 0.5
             elif abs(args.command_yaw) >= 0.05:
@@ -519,7 +547,10 @@ def main() -> None:
         )
         final_planar_speed = float(torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item())
         if args.navigate_to_target:
-            command_ok = target_reached and final_target_distance is not None and final_target_distance <= 0.9 and final_planar_speed < 0.15
+            command_ok = (
+                target_reached and final_target_distance is not None
+                and final_target_distance <= args.success_radius + 0.1 and final_planar_speed < 0.15
+            )
         elif abs(args.command_x) >= 0.05:
             command_ok = args.command_x * displacement > 0.5
         elif abs(args.command_yaw) >= 0.05:

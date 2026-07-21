@@ -169,6 +169,16 @@ Last updated: 2026-07-22 CST
 - 尝试用目标真值生成离线专家：连续 bearing command、差速轮覆盖、固定 turn→forward 技能串联都做了带 MP4 的 smoke。它们分别出现异常角速度、命中后惯性回滑、目标未到达等问题，全部 `success=false`，已删除对应 HDF5/MP4，未进入训练集。`command_y=0.5` 协议测试也不是侧移，而是倒退并伴随转向，不能当横向导航专家。
 - 当前可复用的数据仍只包括固定直线目标和公开 rolling/backward/turn 正样本；下一次搜索必须先解决原生 turn/forward 技能的物理切换和刹停，再采集随机方位目标，不能用失败轨迹硬训模型。
 
+### 导航回放诊断与动力学一致性（2026-07-22）
+
+- 用户回放观察到机器狗仍然像平移，且腿部动作僵硬。这个判断与指标一致：公开 M20 ONNX 是轮式 rolling 低层策略，不是四足步态或完整 ObjectNav 专家；继续训练 v4/v5 不能凭空产生转向和跳跃能力。
+- 原生 turn skill 的最大机身角速度约 `12.8–13.2 rad/s`；把 command/Kd 分段平滑到 60 步仍约 `13.36 rad/s`，因此没有把它用于随机目标专家。
+- 直接轮速 pattern（幅值 `1.0/0.5/0.25`）全部出现塌机身，最低根高约 `0.24–0.39 m`，不作为低层控制器。
+- 目标 `(3,-1)` 的失败验收记录：旧 override 在进入 `0.8 m` 后又滑到 `1.874 m`、末速度 `0.612 m/s`；连续闭环 v1 末距 `1.109 m` 且 `yaw_delta=0.033 rad`；滑移增益 v2 把目标转到错误的 `y=+0.791 m`；修正符号 v3 仍末距 `1.044 m` 且几乎不转。公开 `cmd_vel` 通道的 combined yaw 末 `yaw_delta=-0.006 rad`，纯 yaw `0.05` 也只有 `0.0015 rad`。这些 HDF5/MP4 已清理，全部 `success=false`，没有进入训练集。
+- 对照官方 `AI-DA-STC/M20-autonomy-sim`：ONNX 的 MuJoCo `M20.xml` 使用不同的 link 惯量和 `friction="1 0.01 0.001"` 接触模型；当前 URDF→USD 只保留简化碰撞和各向同性 PhysX 摩擦，动力学并不等价。官方 Gazebo 控制桥的轮子 `Kd=0.6`，launch 默认把 wheel Kd scale 设为 `1.0`；此前为 yaw 临时放大的 `3.6` 已确认会造成角速度尖峰。
+- 新增 [convert_m20_mjcf.py](scripts/convert_m20_mjcf.py) / [convert_m20_mjcf.sh](scripts/convert_m20_mjcf.sh)，显式启用 Isaac Sim 5.1 的 MJCF importer；`assets/m20_mjcf_official_nofloor_v2.usd` 已在 2 TB 盘生成。它能生成完整机器人接触层，但候选在当前 Articulation 回放阶段尚未通过稳定验收，不能替换默认资产或宣称修复完成。
+- 当前决策：暂停随机方位专家采集和 VLA 继续训练；先让官方 MJCF robot-only USD 通过拓扑、直行、转向三项带视频回归，再采集成功的随机目标轨迹。跳跃仍需独立的落地控制器，不能用当前 rolling policy 代替。
+
 ### Jump 专家搜索边界（2026-07-22）
 
 - GitHub/API 搜索了 M20/DeepRobotics/wheel-legged parkour 公开仓库，没有找到可复用的 M20 jump checkpoint；保留的原生 M20公开专家只有 rolling `policy.onnx`。
@@ -178,9 +188,9 @@ Last updated: 2026-07-22 CST
 
 ### 数据清理与存储（2026-07-22）
 
-- 已删除旧 `logs/rsl_rl` PPO checkpoint、失败 jump HDF5/视频、重复诊断视频，以及已完成协议核对的大型源码克隆（约 `803 MB`）。
-- 只保留：成功的 M20 rolling/目标数据、v4 checkpoint、必要的 M20 `policy.onnx`/协议文件、公开 Go1 checkpoint 和跳跃搜索 JSON。旧 v1-v3 checkpoint、重复视频、失败搜索 HDF5/MP4 已删除；当前 `M20ProVLA` 总占用约 `117 MB`，训练、视频、日志全部仍位于 2 TB 盘。
-- 原始来源仓库没有复制进 Git；`public_experts/m20_native/` 仅保留模型和协议快照，个人研究使用，不重新分发外部权重。
+- 已删除旧 `logs/rsl_rl` PPO checkpoint、失败 jump HDF5/视频、重复诊断视频，以及本轮失败目标搜索 HDF5/MP4；失败 MJCF v1 candidate 也已删除。
+- 只保留：成功的 M20 rolling/目标数据、v4 checkpoint、必要的 M20 `policy.onnx`/协议文件、公开 Go1 checkpoint、跳跃搜索 JSON，以及用于动力学核对的官方 M20 模型源码快照和 no-floor MJCF candidate，全部在 2 TB 盘。
+- 官方源码快照只用于个人仿真协议核对，不复制进本 Git 仓库，也不重新分发外部权重；candidate USD 尚未成为默认资产。
 
 ## 常用验证
 
@@ -190,6 +200,16 @@ source scripts/activate_vla_env.sh
 ./scripts/convert_m20pro_urdf.sh
 ./scripts/test_m20pro_asset.sh
 TERM=xterm python scripts/check_m20pro_task.py --headless
+```
+
+官方 M20 MJCF→USD 动力学基线（输出在 2 TB 盘，当前仍是实验 candidate）：
+
+```bash
+./scripts/convert_m20_mjcf.sh \
+  --output /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v2.usd
+
+M20PRO_USD_PATH=/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v2.usd \
+  ./scripts/test_m20pro_asset.sh --steps 240
 ```
 
 `isaaclab.sh` 运行时需要 `TERM=xterm`，以避免 `TERM=dumb` 下 `tabs` 命令失败。

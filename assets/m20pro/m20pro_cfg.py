@@ -1,5 +1,6 @@
 """Isaac Lab configuration for the DEEP Robotics M20 Pro."""
 
+import os
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
@@ -7,7 +8,7 @@ from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 
-USD_PATH = Path(__file__).with_name("m20pro.usd")
+USD_PATH = Path(os.environ.get("M20PRO_USD_PATH", Path(__file__).with_name("m20pro.usd")))
 
 M20PRO_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
