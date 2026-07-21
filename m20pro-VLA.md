@@ -71,6 +71,23 @@ TERM=xterm python scripts/check_m20pro_task.py --headless
 
 ## PPO / TensorBoard 指标词典
 
+### 当前 locomotion 奖励函数
+
+实现位于 `tasks/m20pro_locomotion/m20pro_locomotion_env.py::_get_rewards()`。它不是云深处官方奖励，也不是从某个现成机器人任务原样复制；它使用常见的速度跟踪 locomotion 结构，并针对旧策略“原地站立即获得高奖励”的回放结果设定了第一组工程初值。
+
+```text
+reward =
+    2.0   * exp(-(vx - 1.0)^2 / 0.25)   # 跟踪 1 m/s 前向速度
+  + 0.5   * upright                      # 保持机身直立
+  + 0.05                                 # 小额存活奖励
+  - 0.10  * vy^2                         # 抑制侧滑
+  - 0.20  * vz^2                         # 抑制垂向抖动
+  - 0.02  * ||angular_velocity||^2       # 抑制机身旋转
+  - 0.005 * ||action||^2                 # 抑制过大动作
+```
+
+根高度低于 `0.35 m` 终止 episode，终止步奖励为 `-2.0`。这组系数只是第二版基线，必须根据回放中的前向速度、倒地率、姿态和能耗继续调整。
+
 ### `Loss/value_function`
 
 价值网络（critic）的回归误差。critic 学习预测 `V(s)`，即从当前状态开始未来可获得的累计奖励。该损失衡量预测回报与实际回报的差异。
