@@ -304,8 +304,8 @@ def main() -> None:
         robot.set_joint_position_target(default_pose[:, :12], joint_ids=leg_ids)
         robot.set_joint_velocity_target(zero_wheels, joint_ids=wheel_ids)
         scene.write_data_to_sim()
-        for _ in range(4):
-            sim.step(render=False)
+        for physics_step in range(4):
+            sim.step(render=physics_step == 3)
             scene.update(sim.get_physics_dt())
     last_low_level_action = torch.zeros((1, 16), device=robot.device)
     language = encode_text(args.task_text).to(model_device).unsqueeze(0)
