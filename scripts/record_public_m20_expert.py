@@ -40,6 +40,14 @@ parser.add_argument("--command-yaw", type=float, default=0.0)
 parser.add_argument("--target-color", choices=["none", "red", "blue", "green"], default="none")
 parser.add_argument("--target-x", type=float, default=3.0)
 parser.add_argument("--target-y", type=float, default=0.0)
+parser.add_argument("--initial-yaw-deg", type=float, default=0.0)
+parser.add_argument(
+    "--initial-yaw-jitter-deg",
+    type=float,
+    default=0.0,
+    help="Uniform per-episode yaw jitter around --initial-yaw-deg.",
+)
+parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--stop-after", type=int, default=None, help="Switch the expert command to zero after this control step.")
 parser.add_argument("--stop-on-target", action="store_true", help="Stop with zero action when the simulated target enters the success radius.")
 parser.add_argument("--navigate-to-target", action="store_true", help="Generate goal-directed steering demonstrations from target bearing.")
@@ -85,6 +93,8 @@ if args.episodes <= 0 or args.steps <= 0:
     parser.error("--episodes and --steps must be positive")
 if args.episode_offset < 0:
     parser.error("--episode-offset must be non-negative")
+if args.initial_yaw_jitter_deg < 0.0:
+    parser.error("--initial-yaw-jitter-deg must be non-negative")
 if args.navigate_to_target and args.target_color == "none":
     parser.error("--navigate-to-target requires a colored target")
 if args.nav_forward_speed <= 0.0 or args.nav_heading_gain <= 0.0 or args.nav_max_yaw <= 0.0:
@@ -382,11 +392,17 @@ def encode_text(text: str, max_length: int = 32) -> torch.Tensor:
     return torch.from_numpy(tokens)
 
 
-def reset_scene(scene: InteractiveScene) -> None:
+def reset_scene(scene: InteractiveScene, initial_yaw_rad: float) -> None:
     robot = scene["robot"]
     robot.reset()
     root_state = robot.data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
+    half_yaw = 0.5 * initial_yaw_rad
+    root_state[:, 3:7] = torch.tensor(
+        [[np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)]],
+        dtype=root_state.dtype,
+        device=root_state.device,
+    )
     robot.write_root_pose_to_sim(root_state[:, :7])
     robot.write_root_velocity_to_sim(root_state[:, 7:])
     robot.write_joint_state_to_sim(robot.data.default_joint_pos, robot.data.default_joint_vel)
@@ -400,6 +416,13 @@ def main() -> None:
     if session.get_inputs()[0].shape != [1, 57] or session.get_outputs()[0].shape != [1, 16]:
         raise RuntimeError("Native M20 policy is not the expected 57->16 model")
     dagger_model = None
+    rng = np.random.default_rng(args.seed)
+    if args.episode_offset:
+        rng.uniform(
+            -args.initial_yaw_jitter_deg,
+            args.initial_yaw_jitter_deg,
+            size=args.episode_offset,
+        )
     if args.dagger_checkpoint is not None:
         payload = torch.load(args.dagger_checkpoint, map_location="cpu", weights_only=True)
         config = payload.get("config", {})
@@ -433,6 +456,11 @@ def main() -> None:
         "navigate_to_target": args.navigate_to_target, "override_navigation_wheels": args.override_navigation_wheels,
         "target_color": args.target_color,
         "target_xy": [args.target_x, args.target_y], "wheel_damping": WHEEL_DAMPING,
+        "initial_yaw": {
+            "center_deg": args.initial_yaw_deg,
+            "jitter_deg": args.initial_yaw_jitter_deg,
+            "seed": args.seed,
+        },
         "asset_usd_path": os.environ.get("M20PRO_USD_PATH", str(M20PRO_CFG.spawn.usd_path)),
         "dagger": args.dagger_checkpoint is not None,
         "dagger_checkpoint": None if args.dagger_checkpoint is None else str(args.dagger_checkpoint),
@@ -465,7 +493,11 @@ def main() -> None:
 
     for episode in range(args.episodes):
         episode_id = args.episode_offset + episode
-        reset_scene(scene)
+        episode_initial_yaw_deg = args.initial_yaw_deg + float(
+            rng.uniform(-args.initial_yaw_jitter_deg, args.initial_yaw_jitter_deg)
+        )
+        episode_initial_yaw_rad = float(np.deg2rad(episode_initial_yaw_deg))
+        reset_scene(scene, episode_initial_yaw_rad)
         for _ in range(args.warmup_steps):
             robot.set_joint_position_target(default_pose, joint_ids=leg_ids)
             robot.set_joint_velocity_target(zero_wheels, joint_ids=wheel_ids)
@@ -493,7 +525,14 @@ def main() -> None:
         min_target_distance = float("inf")
         cached_navigation_command: tuple[float, float, float] | None = None
         navigation_command_until = -1
-        target_turn_sign = 1.0 if args.target_y >= 0.0 else -1.0
+        initial_target_heading = float(np.arctan2(args.target_y, args.target_x))
+        initial_heading_error = float(
+            np.arctan2(
+                np.sin(initial_target_heading - episode_initial_yaw_rad),
+                np.cos(initial_target_heading - episode_initial_yaw_rad),
+            )
+        )
+        target_turn_sign = 1.0 if initial_heading_error >= 0.0 else -1.0
         with h5py.File(path, "w") as h5:
             obs = h5.create_group("observation")
             front_ds = obs.create_dataset("front_rgb", (args.steps, args.image_height, args.image_width, 3), dtype="u1", compression="lzf")
@@ -511,6 +550,8 @@ def main() -> None:
             h5.attrs["navigate_to_target"] = args.navigate_to_target
             h5.attrs["target_color"] = args.target_color
             h5.attrs["target_xy"] = np.asarray([args.target_x, args.target_y], dtype=np.float32)
+            h5.attrs["initial_yaw_deg"] = episode_initial_yaw_deg
+            h5.attrs["random_seed"] = args.seed
             h5.attrs["wheel_damping"] = WHEEL_DAMPING
             h5.attrs["expert"] = metadata["expert"]
             h5.attrs["asset_usd_path"] = metadata["asset_usd_path"]
@@ -709,7 +750,8 @@ def main() -> None:
             command_ok = True
         success = bool(stable and command_ok and target_reached)
         print(
-            f"[M20PRO-NATIVE-EXPERT] episode={episode_id} x_displacement={displacement:.4f} m yaw_delta={yaw_delta:.4f} rad "
+            f"[M20PRO-NATIVE-EXPERT] episode={episode_id} initial_yaw_deg={episode_initial_yaw_deg:.3f} "
+            f"x_displacement={displacement:.4f} m yaw_delta={yaw_delta:.4f} rad "
             f"min_root_height={min_height:.4f} m terminated_steps={terminated_steps} command_ok={command_ok} "
             f"target_reached={target_reached} final_target_distance={final_target_distance} "
             f"reached_step={target_reached_step} path_length={path_length:.4f} m success={success} "

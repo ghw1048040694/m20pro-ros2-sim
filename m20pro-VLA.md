@@ -433,7 +433,7 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - `m20_vla_skill_v14_target_visual` 使用 20 条 episode，训练/验证分别为 `2350/775` 帧，训练目标标签为 `not_reached=1029`、`reached=71`；最佳 checkpoint 在第 36 轮，`val_target_loss=0.1170`。训练刚结束时这还只是离线改善，随后才执行下述绿色、红色和蓝色闭环带视频验收。
 - v14 验证集目标距离回归相关系数为 `0.963`、MAE 为 `0.116 m`。单一绝对预测距离门限没有三色共同可靠区间：归一化 `0.32` 可让绿/红停车但蓝色不触发，`0.34` 又会让蓝色在真实约 `0.98 m` 处提前形成候选。因此停止确认改为 learned distance 时序门控：最近 20 次预测的最小值低于 `1.7 m`，随后回升至少 `0.03 m`，再使用原有 8 帧/投票确认；该门控只读取模型输出，不读取目标坐标。
 - 同一组时序参数完成三色带视频闭环：绿色 `(2.5,0.4)` 第 `109` 步停车，最小/最终距离 `0.4806 m`；红色 `(2.5,0.0)` 第 `134` 步停车，最小/最终距离 `0.1084 m`；蓝色 `(3.0,-0.75)` 第 `161` 步停车，最小/最终距离 `0.7894 m`。三条均 `target_reached=true`、`terminated_steps=0`，停车后分别保持 `111/86/119` 步。不过蓝色横向位移仅 `0.0358 m`，主要是在目标半径边缘停车，说明 learned stop 已通过这三条代表性场景，而任意横向位置的目标导向仍未完成。
-- 最终视频保存在 `videos/m20_vla_skill_v14/{green_left04_turnaround_v3,red_center_turnaround_v2,blue_right075_turnaround_v2}/`。删除 4 组被替代的 v14 中间视频/JSON 和 10 个与 `best.pt` 重复的 `last.pt` 后，checkpoint 从约 `27 MB` 降为 `14 MB`；2 TB 盘现有 `58/58` 个 MP4 均为 H.264，完整逐帧解码失败数为 `0`。
+- 初版时序门视频曾保存在 `videos/m20_vla_skill_v14/{green_left04_turnaround_v3,red_center_turnaround_v2,blue_right075_turnaround_v2}/`；它们已在严格验收版本通过后删除。删除 10 个与 `best.pt` 重复的 `last.pt` 后，checkpoint 从约 `27 MB` 降为 `14 MB`。
 
 ### v14 严格停车与侧向执行协议复测（2026-07-22）
 
@@ -441,8 +441,16 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - 公开 M20 专家的蓝色右侧目标协议使用 `wheel_damping=0.2`、`max_yaw_command=0.5` 和 8 帧转向上限。按该协议复测 `(3.0,-0.75)` 后，位移为 `[2.4885,-0.5094] m`、最小/最终距离 `0.5653 m`、`terminated_steps=0`；这证明侧向控制已经恢复，不再只是从目标半径边缘擦过。但 300 步内没有 latch stop，严格结果仍为 `success=false`。
 - learned stop 新增绝对预测距离门 `--target-absolute-stop-distance-m`，与原有时序拐点门取或；它只读取 learned visual distance，不读取用于评估的目标坐标。蓝色 v5 末段预测距离已降到约 `0.47 m`，下一次独占回放需用该混合门完成 100 帧保持验收。
 - stop latch 后不再调用不可靠的零命令 locomotion expert，而是执行对称站立姿态和零轮速目标，并记录停车后的机身/轮速。直接反向力矩和反向轮速两种主动制动试验都会放大轮速，已从当前实现移除。
-- 红色 `red_center_stand_brake_strict_v5` 在较短确认窗口下曾分别停在 `0.8543/0.8060 m`，说明厘米级 PhysX 波动会让边界结果不稳定。将 learned stop 默认确认提高到连续 `14` 帧、15 帧窗口内 `0.90` 投票后，第 `100` 步进入半径、第 `101` 步停车，半径内连续保持 `199` 帧，最低/最终距离 `0.7579/0.7814 m`，`success=true`、`terminated_steps=0`；停车后最终平面速度 `0.00172 m/s`、最终平均绝对轮速 `0.00714 rad/s`。这是当前严格规则下红色场景的首条通过结果，仍需用同一参数独占复测绿色和蓝色。
-- 本阶段代码完成 `py_compile` 和 `git diff --check`。所有新回放继续强制 `--headless --video`，严格失败结果也保留 H.264 视频和 JSON 作为诊断证据；当前 2 TB 盘 `65/65` 个 MP4 均为 H.264，完整逐帧解码失败数为 `0`。
+- 红色 `red_center_stand_brake_strict_v5` 在较短确认窗口下曾分别停在 `0.8543/0.8060 m`，说明厘米级 PhysX 波动会让边界结果不稳定。将 learned stop 默认确认提高到连续 `14` 帧、15 帧窗口内 `0.90` 投票后，第 `100` 步进入半径、第 `101` 步停车，半径内连续保持 `199` 帧，最低/最终距离 `0.7579/0.7814 m`，`success=true`、`terminated_steps=0`；停车后最终平面速度 `0.00172 m/s`、最终平均绝对轮速 `0.00714 rad/s`。
+- 同一严格参数下绿色 `(2.5,0.4)` 第 `115` 步停车，连续保持 `185` 帧，最低/最终距离 `0.4109/0.4296 m`；蓝色 `(3.0,-0.75)` 使用公开专家一致的 `wheel_damping=0.2`、负 yaw 镜像和 `max_yaw=0.5`，第 `303` 步停车，连续保持 `117` 帧，最低/最终距离 `0.4693/0.4740 m`，真实横向位移 `-0.5446 m`。三条均 `success=true`、`terminated_steps=0`，证明当前代表性三色目标的严格导航和 learned stop 已共同通过，但这还不是随机方位 ObjectNav。
+- 只保留三条严格成功和 `blue_right075_damping02_v5` 一条代表性 no-stop 失败；删除其余 8 组被替代 v14 JSON/视频后，日志由 `3.4 MB` 降至 `2.7 MB`、视频由 `14 MB` 降至 `12 MB`。训练数据审计为 20 条 HDF5：16 条成功专家、3 条稳定 search、1 条到达目标的 DAgger；共 `192 MB` 且全部位于 2 TB 盘，因此没有误删有效训练数据。
+
+### 随机初始朝向公开专家数据 v1（2026-07-22）
+
+- [record_public_m20_expert.py](scripts/record_public_m20_expert.py) 新增 `--initial-yaw-deg`、`--initial-yaw-jitter-deg` 和 `--seed`。每条 episode 在重置时写入可复现 yaw，并在 HDF5 保存 `initial_yaw_deg/random_seed`；`episode_offset` 会跳过已有随机序列，追加采集不会重复样本。
+- 专家仍来自公开 `AI-DA-STC/M20-autonomy-sim` 的 `57 -> 16` ONNX 策略；目标坐标只用于生成成功示范和离线标签，不进入 VLA 输入，全程没有 simulator reward 或 PPO。
+- `m20_skill_expert_random_yaw_red_v1` 已采集三条 500 帧成功轨迹，初始 yaw 为 `+10.958/-2.445/+14.344 deg`，最终距离为 `0.7616/0.7903/0.7867 m`，最低根高 `0.4613-0.4643 m`、`terminated_steps=0`。三份 HDF5 的前后 RGB、LiDAR、proprio、state、action 和 expert command 均长度一致、数值有限；三条 H.264 视频均完整解码。
+- 新数据约 `48 MB`、视频约 `688 KB`，全部在 2 TB 盘。当前关键产物合计约 `324 MB`：数据集 `239 MB`、公开专家 `56 MB`、checkpoint `14 MB`、视频 `13 MB`、日志 `2.7 MB`；`62/62` 个 MP4 均为 H.264，完整逐帧解码失败数为 `0`。下一步从 v14 初始化并冻结动作主干，只重训独立 `visual_v2` target encoder，然后对随机初始朝向做未见场景闭环验收。
 
 v14 绿色目标复现命令（显式无头并录制视频）：
 
@@ -451,11 +459,11 @@ source scripts/activate_vla_env.sh
 python scripts/play_m20_vla_skill.py --headless --video \
   --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v14_target_visual/best.pt \
   --task-text "到绿色方块去" --target-color green --target-x 2.5 --target-y 0.4 \
-  --steps 220 --target-distance-threshold 0.34 \
+  --steps 300 --target-distance-threshold 0.34 \
   --target-turnaround-window 20 --target-turnaround-rise-m 0.03 \
   --min-forward-command 0.08 \
-  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_skill_v14/green_replay \
-  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_skill_v14_green_replay.json
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_skill_v14/green_left04_strict_v6 \
+  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_skill_v14_green_left04_strict_v6.json
 ```
 
 ## 待办路线
