@@ -195,6 +195,14 @@ Last updated: 2026-07-22 CST
 - 只保留：成功的 M20 rolling/目标数据、v4 checkpoint、必要的 M20 `policy.onnx`/协议文件、公开 Go1 checkpoint、跳跃搜索 JSON，以及用于动力学核对的官方 M20 模型源码快照和 no-floor MJCF candidate，全部在 2 TB 盘。
 - 官方源码快照只用于个人仿真协议核对，不复制进本 Git 仓库，也不重新分发外部权重；candidate USD 尚未成为默认资产。
 
+### 公开 VLA 架构检索与 M20 兼容性探针（2026-07-22）
+
+- 检索并核对了公开的 [NaVILA](https://github.com/AnjieCheng/NaVILA)、[NaVILA-Bench](https://github.com/yang-zj1026/NaVILA-Bench) 和 [legged-loco](https://github.com/yang-zj1026/legged-loco)。它们采用“高层视觉语言导航动作 + 独立低层 locomotion policy”的两层协议；公开 NaVILA Llama-3 8B checkpoint 约需 24 GB 以上显存，当前 RTX 3060 12 GB 不适合直接部署。
+- 已下载公开 NaVILA Go2 vision locomotion checkpoint：`public_experts/navila_go2_vision/policy.jit`，协议为 `909 -> 12` 个 Go2 腿关节目标。它不是 M20 专家，也不是完整 ObjectNav 或 jump VLA。
+- 新增 [play_public_navila_go2_on_m20.py](scripts/play_public_navila_go2_on_m20.py) 做物理兼容性探针：固定 M20 关节顺序、官方镜像站立姿态，输入 909 维观测，保留第三人称 MP4 和 JSON 指标。`100` 步 smoke 实测 `x_displacement=0.1189 m`、`min_root_height=0.2131 m`、`terminated_steps=97`，说明 Go2 权重直接套用 M20 会倒地，不能进入训练集或宣称为 M20 低层专家。
+- 探针结果确认两层 VLA 思路值得借鉴，但低层必须换成 M20 原生 rolling/未来的 M20 jump expert；当前不再继续把 Go2/Go1 异构关节动作硬重定向到 M20。
+- 本轮清理后 2 TB 输出根目录约 `289 MB`，失败目标搜索数据、旧 checkpoint 和重复视频已移除；保留的每条诊断结果仍有 MP4、JSON 和来源说明。
+
 ## 常用验证
 
 ```bash
