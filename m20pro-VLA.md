@@ -441,7 +441,7 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - 公开 M20 专家的蓝色右侧目标协议使用 `wheel_damping=0.2`、`max_yaw_command=0.5` 和 8 帧转向上限。按该协议复测 `(3.0,-0.75)` 后，位移为 `[2.4885,-0.5094] m`、最小/最终距离 `0.5653 m`、`terminated_steps=0`；这证明侧向控制已经恢复，不再只是从目标半径边缘擦过。但 300 步内没有 latch stop，严格结果仍为 `success=false`。
 - learned stop 新增绝对预测距离门 `--target-absolute-stop-distance-m`，与原有时序拐点门取或；它只读取 learned visual distance，不读取用于评估的目标坐标。蓝色 v5 末段预测距离已降到约 `0.47 m`，下一次独占回放需用该混合门完成 100 帧保持验收。
 - stop latch 后不再调用不可靠的零命令 locomotion expert，而是执行对称站立姿态和零轮速目标，并记录停车后的机身/轮速。直接反向力矩和反向轮速两种主动制动试验都会放大轮速，已从当前实现移除。
-- 当前红色 `red_center_stand_brake_strict_v5` 在第 `95` 步停车，最低/最终目标距离分别为 `0.8316/0.8543 m`，未进入 `0.8 m` 半径，所以严格结果仍为 `success=false`；但 `terminated_steps=0`，停车后最终平面速度仅 `0.00164 m/s`、最终平均绝对轮速 `0.00774 rad/s`。这表明停车执行已经稳定，剩余主要问题是 learned stop 约提前 `5 cm` 触发，而不是继续增大制动力。
+- 当前红色 `red_center_stand_brake_strict_v5` 两次独占重复分别在第 `95/99` 步停车：一次最低/最终距离为 `0.8316/0.8543 m`，另一次最低距离 `0.7830 m`、只在半径内连续保持 `7` 帧并最终停在 `0.8060 m`；两次均 `success=false`、`terminated_steps=0`。停车后最终平面速度约 `0.0016-0.0018 m/s`、最终平均绝对轮速约 `0.0075 rad/s`，说明停车执行已稳定，但 learned stop 仍有厘米级提前量和 PhysX 闭环波动，尚未通过 100 帧严格保持。
 - 本阶段代码完成 `py_compile` 和 `git diff --check`。所有新回放继续强制 `--headless --video`，严格失败结果也保留 H.264 视频和 JSON 作为诊断证据；当前 2 TB 盘 `65/65` 个 MP4 均为 H.264，完整逐帧解码失败数为 `0`。
 
 v14 绿色目标复现命令（显式无头并录制视频）：
