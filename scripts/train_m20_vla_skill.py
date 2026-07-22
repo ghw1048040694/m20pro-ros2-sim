@@ -40,7 +40,13 @@ parser.add_argument("--device", default="cuda:0")
 parser.add_argument("--command-loss-weight", type=float, default=1.0)
 parser.add_argument("--skill-loss-weight", type=float, default=0.5)
 parser.add_argument("--post-reach-steps", type=int, default=20, help="Keep at most this many stop frames after a successful target reach.")
+parser.add_argument("--init-checkpoint", type=Path, default=None)
+parser.add_argument("--freeze-backbone", action="store_true", help="Train only skill_head; used to add skills without forgetting navigation.")
+parser.add_argument("--search-head", action="store_true", help="Add an isolated language search-intent head.")
+parser.add_argument("--search-loss-weight", type=float, default=1.0)
 args = parser.parse_args()
+if args.freeze_backbone and args.init_checkpoint is None:
+    parser.error("--freeze-backbone requires --init-checkpoint")
 
 
 @dataclass
@@ -73,6 +79,7 @@ def default_dataset_dirs() -> list[Path]:
     names = ["public_m20_native_v1", "public_m20_native_backward_v1", "public_m20_native_turn_v2"]
     names.extend(sorted(path.name for path in (DATA_ROOT / "datasets").glob("m20_vla_sync_*")))
     names.extend(sorted(path.name for path in (DATA_ROOT / "datasets").glob("m20_skill_expert_*")))
+    names.extend(sorted(path.name for path in (DATA_ROOT / "datasets").glob("m20_search_expert_*")))
     return [DATA_ROOT / "datasets" / name for name in names]
 
 
@@ -87,7 +94,13 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
             raise FileNotFoundError(f"Dataset directory does not exist: {directory}")
         for path in sorted(directory.glob("episode_*.h5")):
             with h5py.File(path, "r") as h5:
-                if not bool(h5.attrs.get("success", False)):
+                task_text = str(h5.attrs.get("task_text", ""))
+                stable_search = (
+                    any(token in task_text for token in ("寻找", "搜索", "扫描"))
+                    and int(h5.attrs.get("terminated_steps", 1)) == 0
+                    and float(h5.attrs.get("min_root_height", 0.0)) >= 0.45
+                )
+                if not bool(h5.attrs.get("success", False)) and not stable_search:
                     print(f"[M20PRO-SKILL] skip unsuccessful episode={path}")
                     continue
                 obs = h5["observation"]
@@ -115,13 +128,15 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                     raise ValueError(f"Length mismatch in {path}")
                 if len(command) == 0 or not all(np.isfinite(x).all() for x in (lidar, proprio, command)):
                     raise ValueError(f"Non-finite or empty episode: {path}")
-                episodes.append(Episode(path, str(h5.attrs.get("task_text", "")), front, rear, lidar, proprio, command))
+                episodes.append(Episode(path, task_text, front, rear, lidar, proprio, command))
     if not episodes:
         raise RuntimeError("No successful M20 expert episodes available")
     return episodes
 
 
-def skill_id(command: np.ndarray) -> int:
+def skill_id(command: np.ndarray, task_text: str = "") -> int:
+    if any(token in task_text for token in ("寻找", "搜索", "扫描")):
+        return SKILL_NAMES.index("search")
     forward, _, yaw = command
     # Slow approach commands (for example 0.045 m/s) are still forward
     # locomotion.  Only an explicit zero command is the stop skill.
@@ -157,7 +172,11 @@ class FrameDataset(Dataset):
             "proprio": torch.from_numpy(episode.proprio[step].copy()).float(),
             "language": torch.from_numpy(encode_text(episode.task_text)),
             "command": torch.from_numpy(command / COMMAND_SCALE.numpy()).float(),
-            "skill": torch.tensor(skill_id(episode.command[step]), dtype=torch.long),
+            "skill": torch.tensor(skill_id(episode.command[step], episode.task_text), dtype=torch.long),
+            "search_target": torch.tensor(
+                1.0 if any(token in episode.task_text for token in ("寻找", "搜索", "扫描")) else 0.0,
+                dtype=torch.float32,
+            ),
         }
 
 
@@ -174,10 +193,22 @@ def run_epoch(
     for batch in loader:
         batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
         with torch.set_grad_enabled(training):
-            command_pred, skill_logits = model(batch["rgb"], batch["lidar"], batch["proprio"], batch["language"])
+            outputs = model(batch["rgb"], batch["lidar"], batch["proprio"], batch["language"])
+            if args.search_head:
+                command_pred, skill_logits, search_logit = outputs
+            else:
+                command_pred, skill_logits = outputs
             command_loss = nn.functional.smooth_l1_loss(command_pred, batch["command"])
             skill_loss = nn.functional.cross_entropy(skill_logits, batch["skill"], weight=skill_weight)
-            loss = args.command_loss_weight * command_loss + args.skill_loss_weight * skill_loss
+            search_loss = (
+                nn.functional.binary_cross_entropy_with_logits(search_logit, batch["search_target"])
+                if args.search_head else torch.zeros((), device=device)
+            )
+            loss = (
+                args.command_loss_weight * command_loss
+                + args.skill_loss_weight * skill_loss
+                + args.search_loss_weight * search_loss
+            )
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -211,7 +242,7 @@ def main() -> None:
     val_set = FrameDataset(val_episodes, args.stride) if val_episodes else None
     if not train_set:
         raise RuntimeError("Training split is empty")
-    train_skills = torch.tensor([skill_id(ep.command[step]) for ep_id, step in train_set.frames for ep in [train_set.episodes[ep_id]]])
+    train_skills = torch.tensor([skill_id(ep.command[step], ep.task_text) for ep_id, step in train_set.frames for ep in [train_set.episodes[ep_id]]])
     counts = torch.bincount(train_skills, minlength=len(SKILL_NAMES)).float()
     skill_weight = (counts.sum() / counts.clamp_min(1.0)).sqrt()
     skill_weight = (skill_weight / skill_weight.mean()).to(args.device if torch.cuda.is_available() else "cpu")
@@ -221,8 +252,20 @@ def main() -> None:
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True) if val_set else None
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
     skill_weight = skill_weight.to(device)
-    model = M20VLASkillPolicy(args.architecture).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-5)
+    model = M20VLASkillPolicy(args.architecture, search_head=args.search_head).to(device)
+    if args.init_checkpoint is not None:
+        payload = torch.load(args.init_checkpoint, map_location=device, weights_only=True)
+        model.load_state_dict(payload["model_state_dict"], strict=False)
+    if args.freeze_backbone:
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad = name.startswith("search_head.") if args.search_head else (
+                name.startswith("language.") or name.startswith("skill_head.")
+            )
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=args.learning_rate,
+        weight_decay=1e-5,
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config = {
@@ -238,6 +281,10 @@ def main() -> None:
         "val_episodes": [str(ep.path) for ep in val_episodes],
         "expert": "AI-DA-STC/M20-autonomy-sim policy.onnx plus successful target-bearing command labels",
         "reward_used": False,
+        "init_checkpoint": None if args.init_checkpoint is None else str(args.init_checkpoint),
+        "freeze_backbone": args.freeze_backbone,
+        "search_head": args.search_head,
+        "search_loss_weight": args.search_loss_weight,
         "seed": args.seed,
     }
     (args.output_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")

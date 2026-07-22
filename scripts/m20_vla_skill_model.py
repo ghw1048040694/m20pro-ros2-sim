@@ -19,11 +19,12 @@ class M20VLASkillPolicy(nn.Module):
     verified demonstrations are added.
     """
 
-    def __init__(self, architecture: str = "spatial_v2"):
+    def __init__(self, architecture: str = "spatial_v2", search_head: bool = False):
         super().__init__()
         if architecture not in {"global_v1", "spatial_v2"}:
             raise ValueError(f"Unsupported architecture: {architecture}")
         self.architecture = architecture
+        self.search_head_enabled = search_head
         image_pool = nn.AdaptiveAvgPool2d(1) if architecture == "global_v1" else nn.AdaptiveAvgPool2d((3, 5))
         self.image = nn.Sequential(
             nn.Conv2d(6, 24, kernel_size=5, stride=2, padding=2),
@@ -60,6 +61,9 @@ class M20VLASkillPolicy(nn.Module):
         )
         self.command_head = nn.Linear(256, 3)
         self.skill_head = nn.Linear(256, len(SKILL_NAMES))
+        self.search_head = (
+            nn.Sequential(nn.Linear(24, 32), nn.GELU(), nn.Linear(32, 1)) if search_head else None
+        )
 
     def forward(
         self,
@@ -80,4 +84,9 @@ class M20VLASkillPolicy(nn.Module):
         language_feature = (language_embedding * mask).sum(1) / mask.sum(1).clamp_min(1)
         language_feature = self.language[1:](language_feature)
         fused = self.fusion(torch.cat((image_feature, lidar_feature, proprio_feature, language_feature), dim=-1))
-        return torch.tanh(self.command_head(fused)), self.skill_head(fused)
+        command = torch.tanh(self.command_head(fused))
+        skill_logits = self.skill_head(fused)
+        if self.search_head is None:
+            return command, skill_logits
+        search_feature = (language_embedding * mask).sum(1) / mask.sum(1).clamp_min(1)
+        return command, skill_logits, self.search_head(search_feature).squeeze(-1)

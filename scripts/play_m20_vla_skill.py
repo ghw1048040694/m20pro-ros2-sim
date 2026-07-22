@@ -43,6 +43,8 @@ parser.add_argument("--max-turn-steps", type=int, default=8, help="Maximum conse
 parser.add_argument("--turn-recovery-steps", type=int, default=20, help="Forward frames used after the turn watchdog trips.")
 parser.add_argument("--max-yaw-command", type=float, default=0.25)
 parser.add_argument("--max-forward-command", type=float, default=0.35)
+parser.add_argument("--search-yaw-command", type=float, default=0.5)
+parser.add_argument("--search-threshold", type=float, default=0.5)
 parser.add_argument("--model-device", default="cpu")
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIR)
 parser.add_argument("--metrics", type=Path, default=None)
@@ -54,7 +56,7 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if not args.video:
     parser.error("--video is required so every replay leaves an inspectable MP4")
-if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0:
+if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0:
     parser.error("--steps must be positive and timing values must be non-negative")
 if not args.checkpoint.is_file():
     parser.error(f"skill checkpoint not found: {args.checkpoint}")
@@ -222,8 +224,9 @@ def reset_scene(scene: InteractiveScene) -> None:
 def main() -> None:
     payload = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     config = payload.get("config", {})
-    model = M20VLASkillPolicy(config.get("architecture", "spatial_v2"))
-    model.load_state_dict(payload["model_state_dict"])
+    search_head = bool(config.get("search_head", False))
+    model = M20VLASkillPolicy(config.get("architecture", "spatial_v2"), search_head=search_head)
+    model.load_state_dict(payload["model_state_dict"], strict=False)
     model_device = torch.device(args.model_device if torch.cuda.is_available() or not args.model_device.startswith("cuda") else "cpu")
     model.to(model_device).eval()
     session = ort.InferenceSession(str(args.policy), providers=["CPUExecutionProvider"])
@@ -278,9 +281,17 @@ def main() -> None:
     turn_streak = 0
     recovery_remaining = 0
     last_nonstop_command = (args.max_forward_command, 0.0, 0.0)
+    search_remaining = 0
+    search_sign = -1.0
     try:
         for step in range(args.steps):
-            if recovery_remaining > 0:
+            if search_remaining > 0:
+                cached_skill = "search"
+                cached_command = (0.0, 0.0, search_sign * args.search_yaw_command)
+                search_remaining -= 1
+                stop_confidence_streak = 0
+                stop_votes.clear()
+            elif recovery_remaining > 0:
                 cached_skill = "forward_recovery"
                 cached_command = (args.max_forward_command, 0.0, 0.0)
                 recovery_remaining -= 1
@@ -293,10 +304,16 @@ def main() -> None:
                 scan = lidar_scan(lidar).unsqueeze(0).to(model_device)
                 proprio = high_level_proprio(robot, joint_ids, last_low_level_action).to(model_device)
                 with torch.inference_mode():
-                    command_norm, skill_logits = model(rgb, scan, proprio, language)
+                    outputs = model(rgb, scan, proprio, language)
+                    if search_head:
+                        command_norm, skill_logits, search_logit = outputs
+                        search_probability = float(torch.sigmoid(search_logit[0]).item())
+                    else:
+                        command_norm, skill_logits = outputs
+                        search_probability = 0.0
                 command_np = (command_norm[0].detach().cpu().numpy() * COMMAND_SCALE.numpy()).astype(np.float32)
                 skill_index = int(skill_logits[0].argmax().item())
-                cached_skill = SKILL_NAMES[skill_index]
+                cached_skill = "search" if search_probability >= args.search_threshold else SKILL_NAMES[skill_index]
                 # Turn/translation are canonicalized before reaching the
                 # native expert.  This keeps regression noise in the command
                 # head from turning a discrete skill into a curved skid.
@@ -324,7 +341,11 @@ def main() -> None:
                 elif cached_skill == "backward":
                     turn_streak = 0
                     cached_command = (max(min(float(command_np[0]), 0.0), -args.max_forward_command), 0.0, 0.0)
-                elif cached_skill in {"stop", "search", "jump"}:
+                elif cached_skill == "search":
+                    turn_streak = 0
+                    search_remaining = max(search_remaining, 20)
+                    cached_command = (0.0, 0.0, search_sign * args.search_yaw_command)
+                elif cached_skill in {"stop", "jump"}:
                     turn_streak = 0
                     # A stop prediction is only a candidate until its
                     # confidence streak is confirmed.  Keep moving with the
@@ -348,7 +369,7 @@ def main() -> None:
                 if cached_skill not in {"stop", "search", "jump"} and cached_skill != "forward_recovery":
                     last_nonstop_command = cached_command
                 if args.debug_steps and step < args.debug_steps:
-                    print(f"[M20PRO-SKILL-DEBUG] step={step} skill={cached_skill} stop_p={stop_probability:.3f} command={cached_command}", flush=True)
+                    print(f"[M20PRO-SKILL-DEBUG] step={step} skill={cached_skill} search_p={search_probability:.3f} stop_p={stop_probability:.3f} command={cached_command}", flush=True)
             command = (0.0, 0.0, 0.0) if stop_latched else cached_command
             command_sum += np.asarray(command)
             command_count += 1
@@ -404,6 +425,8 @@ def main() -> None:
         "stop_vote_window": args.stop_vote_window, "stop_vote_fraction": args.stop_vote_fraction,
         "max_turn_steps": args.max_turn_steps, "turn_recovery_steps": args.turn_recovery_steps,
         "max_yaw_command": args.max_yaw_command, "max_forward_command": args.max_forward_command,
+        "search_yaw_command": args.search_yaw_command,
+        "search_threshold": args.search_threshold, "search_head": search_head,
         "displacement_xy": displacement.tolist(), "yaw_delta": yaw_delta,
         "min_root_height": min_height, "max_root_height": max_height, "terminated_steps": terminated_steps,
         "target_reached": target_reached, "target_reached_step": target_reached_step,

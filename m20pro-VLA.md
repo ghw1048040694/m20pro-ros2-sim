@@ -299,7 +299,7 @@ VLA 红色目标闭环回放（wrapper 自动带 `--headless --video`，并写 M
 ```bash
 ./scripts/train_m20_vla_skill.sh \
   --epochs 60 --batch-size 64 --post-reach-steps 20 --device cuda:0 \
-  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v7
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v8
 ```
 
 两层 VLA 红色目标回放（高层 CPU 推理、低层公开 M20 ONNX、自动写视频）：
@@ -307,12 +307,24 @@ VLA 红色目标闭环回放（wrapper 自动带 `--headless --video`，并写 M
 ```bash
 export M20PRO_USD_PATH=/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v6.usd
 ./scripts/play_m20_vla_skill.sh \
-  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v7/best.pt \
+  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v8/best.pt \
   --policy /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/public_experts/m20_native/policy.onnx \
   --task-text "到红色方块去" --target-color red --target-x 2.5 --target-y 0.0 \
   --steps 300 --warmup-steps 75 --model-device cpu \
-  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_skill_v7/red \
-  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_skill_v7_red.json
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_skill_v8/red \
+  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_skill_v8_red.json
+```
+
+两层 VLA search 技能回放（当前 candidate 的物理 yaw 适配为单向扫描）：
+
+```bash
+./scripts/play_m20_vla_skill.sh \
+  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v8/best.pt \
+  --policy /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/public_experts/m20_native/policy.onnx \
+  --task-text "寻找目标" --target-color none --steps 120 --warmup-steps 75 \
+  --search-yaw-command 0.5 --model-device cpu \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_skill_v8/search \
+  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_skill_v8_search.json
 ```
 
 ## PPO / TensorBoard 指标词典
@@ -385,15 +397,23 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 
 下一轮应优先采集多个初始姿态、目标距离和目标横向位置的 DAgger 轨迹，并以“到达后 0.8 m 内保持 2 s、根高 >= 0.45 m、无倒地”为验收；在此之前不再增加 epoch，也不进入 1 m jump 集成。
 
-### 两层 VLA 技能策略 v1-v7（2026-07-22）
+### 两层 VLA 技能策略 v1-v11（2026-07-22）
 
 - 新增 [m20_vla_skill_model.py](scripts/m20_vla_skill_model.py)、[train_m20_vla_skill.py](scripts/train_m20_vla_skill.py) 和 [play_m20_vla_skill.py](scripts/play_m20_vla_skill.py)。高层模型输入前后 RGB、72 线 LiDAR、去除专家 command/action history 的 57 维 proprio 和语言，输出 `forward/backward/left/right/stop/search/jump` 技能以及给 M20 原生 ONNX 的 3 维 command；低层仍是公开 `AI-DA-STC/M20-autonomy-sim` 的 `57 -> 16` 专家，不使用 PPO 奖励。
-- 修正了两项数据/闭环问题：到达后只保留 20 帧停车样本，避免静止尾段淹没滚动数据；慢速接近命令（约 `0.045 m/s`）不能按 stop 标注，只有明确全零命令才是 stop。当前 v7 checkpoint 位于 `checkpoints/m20_vla_skill_v7/best.pt`，16 条成功专家 episode、2004 个训练帧，验证技能准确率约 `0.90`，标签覆盖 `forward/backward/left/right/stop`；`search/jump` 仍为零标签。
+- 修正了两项数据/闭环问题：到达后只保留 20 帧停车样本，避免静止尾段淹没滚动数据；慢速接近命令（约 `0.045 m/s`）不能按 stop 标注，只有明确全零命令才是 stop。当前 v8 checkpoint 位于 `checkpoints/m20_vla_skill_v8/best.pt`，19 条 episode、2254 个训练帧，验证技能准确率约 `0.98`；标签覆盖 `forward/backward/left/right/stop/search`，`jump` 仍为零标签。v8 新增 3 条物理稳定的 `寻找目标` 扫描轨迹；它们因 candidate yaw 符号与公开 command 约定相反而不标作导航 success，但作为 search skill 数据保留。
 - 红色目标 `(2.5, 0.0)` 两层闭环通过：`target_reached=true`、最小距离 `0.7376 m`、停止后稳定、`terminated_steps=0`。关键视频：`videos/m20_vla_skill_v4/red_center/`。
 - 绿色目标 `(2.5, 0.4)` 两层闭环通过：`target_reached=true`、最小距离 `0.6346 m`、停止步 `121`、`terminated_steps=0`。关键视频：`videos/m20_vla_skill_v5/green_left04/`。
 - 蓝色正前方目标能识别并接近，但当前固定停止确认窗口的指标为 `0.8005–0.8482 m`，尚未按严格 `0.8 m` 验收；蓝色横向目标能进入半径但最终不停车，且 yaw/横向转向不足。当前结论是两层接口和 RGB 目标识别已建立，主动搜索、任意横向方位和稳定停车尚未完成。
+- `寻找目标` search 回放：120 步 `skill_counts={'search':120}`、`min_root_height=0.515 m`、`terminated_steps=0`、`yaw_delta=-0.132 rad`，视频位于 `videos/m20_vla_skill_v8/search_v2/`。当前 candidate 只能稳定单向扫描，尚未把目标重新获取和 stop 串成成功 ObjectNav。
 - 新增成功专家数据：红色 `(2.2,0.25)`、绿色 `(2.8,0.8)`、绿色近距 `(1.5,0.4)`、蓝色负向镜像 `(3.0,-0.75)`、蓝色近距 `(1.5,-0.4)`；失败的蓝色负转弯和红色远距轨迹已删除，不进入训练集。
 - 当前两层回放命令必须包含 `--headless --video`。停止候选使用连续确认/投票，只负责耗散接近目标时的惯性；它没有读取目标坐标，目标坐标只用于离线指标。
+
+### v11 隔离 search head 复测（2026-07-22）
+
+- v11 从 v7 初始化，冻结视觉、LiDAR、本体状态、融合、command 和导航主干，只增加独立的语言 `search_intent_head`；这样 search 语义不会直接改写已验证的 rolling 主干。
+- 红色目标 `(2.5, 0.0)` 回放通过：`target_reached=true`、第 `100` 步进入目标判定、最小距离 `0.4663 m`、第 `120` 步停止、`terminated_steps=0`。视频：`videos/m20_vla_skill_v11/red_center/`。
+- 绿色目标 `(2.5, 0.4)` 复测失败：最小距离 `1.1601 m`，第 `99` 步误触发停止，`terminated_steps=0`；技能计数为 `left=26`、`forward_recovery=63`、`stop=211`。因此 v11 不能作为全场景导航成功版本，需先区分 GPU PhysX 非确定性和 search head/输入变化造成的行为偏移。
+- v11 search 扫描本身稳定：`120` 步全为 `search`，`min_root_height=0.515 m`、`terminated_steps=0`、`yaw_delta=-0.132 rad`；这仍不代表发现物体或完成 ObjectNav。
 
 ## 待办路线
 
