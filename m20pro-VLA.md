@@ -422,7 +422,7 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - v13 使用理论距离阈值 `0.16`（约 `0.8 m / 5 m`）时在 `1.1539 m` 误停；阈值降到 `0.10` 后不再触发 stop，但 command 回归头把前进速度降到接近零，最终仍停在 `1.1543 m`。因此不能把 v13 标记为成功。
 - 为尚未满足 learned stop 的 `forward` 技能设置 `0.08 m/s` 最小接近速度后，阈值 `0.10` 和 `0.14` 两次回放都进入目标半径，最小距离分别为 `0.3439 m` 和 `0.3438 m`，且 `terminated_steps=0`；但两次均为 `stop_step=None`，机器人穿过目标而没有停车。因此最小接近速度只解决了约 `1.15 m` 处速度衰减，learned stop 仍未校准，下一步必须记录完整预测曲线而不是继续猜阈值。
 - 定位到此前全部 MP4 使用 OpenCV `mp4v`（MPEG-4 Part 2），文件本身完整但桌面播放器兼容性差。新增 [video_utils.py](scripts/video_utils.py) 和 [convert_videos_to_h264.py](scripts/convert_videos_to_h264.py)，所有 9 个录制/回放脚本在关闭视频后自动原子转为 `H.264/yuv420p + faststart`。
-- 2 TB 盘上的视频已再次全量扫描，并将 `logs/videos/` 中最后一个遗漏的 MPEG-4 文件原位转码。当前 `54/54` 均为 H.264，使用打包的 FFmpeg 从第一帧到最后一帧完整解码，失败数为 `0`；视频主目录约 `11 MB`，桌面播放器不会再依赖旧 `mp4v` 解码器。
+- 2 TB 盘上的视频已再次全量扫描，并将 `logs/videos/` 中最后一个遗漏的 MPEG-4 文件原位转码。当前已有 `55/55` 为 H.264（含 v13 trace 新回放），使用打包的 FFmpeg 从第一帧到最后一帧完整解码，失败数为 `0`；视频主目录约 `11 MB`，桌面播放器不会再依赖旧 `mp4v` 解码器。
 - 新录制链路另以 `videos/h264_writer_smoke_v1/` 完成 30 帧实测：输出为 `H.264/yuv420p`、`50 FPS`、`480x288`，首帧和末帧均可解码；桌面 `video/mp4` 默认关联已统一到 Microsoft Edge。
 
 ### v13 trace 与 v14 独立目标视觉分支（2026-07-22）
