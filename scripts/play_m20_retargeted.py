@@ -12,6 +12,7 @@ import h5py
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 DEFAULT_OUTPUT_ROOT = Path(
     os.environ.get(
@@ -132,7 +133,7 @@ def main() -> None:
         height = float(robot.data.root_pos_w[0, 2].item())
         min_height = min(min_height, height)
         max_height = max(max_height, height)
-    video.release()
+    finalize_h264_video(video, video_path)
     end_x = float(robot.data.root_pos_w[0, 0].item())
     print(f"[M20PRO-RETARGET-PLAY] source={args.actions_h5}", flush=True)
     print(f"[M20PRO-RETARGET-PLAY] steps={steps} x_displacement={end_x - start_x:.4f} m", flush=True)

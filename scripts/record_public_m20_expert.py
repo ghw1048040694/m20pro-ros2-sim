@@ -19,6 +19,7 @@ import h5py
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
@@ -685,7 +686,7 @@ def main() -> None:
             h5.attrs["final_planar_speed"] = final_planar_speed
             h5.attrs["path_length"] = path_length
             h5.attrs["success"] = success
-        video.release()
+        finalize_h264_video(video, video_path)
         displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
         stable = terminated_steps == 0 and min_height >= 0.45
         final_target_distance = (

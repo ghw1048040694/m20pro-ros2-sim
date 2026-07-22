@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
@@ -402,7 +403,7 @@ def main() -> None:
             )
             terminated_steps += int(height < 0.25 or gravity_z > -0.5)
     finally:
-        video.release()
+        finalize_h264_video(video, video_path)
 
     displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
     print(f"[M20PRO-NATIVE-PLAY] policy={args.policy}", flush=True)

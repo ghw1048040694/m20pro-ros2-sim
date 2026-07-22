@@ -16,6 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
 DEFAULT_POLICY = DATA_ROOT / "public_experts/navila_go2_vision/policy.jit"
@@ -192,7 +193,7 @@ def main() -> None:
             )
             terminated_steps += int(height < 0.45 or gravity_z > -0.5)
     finally:
-        video.release()
+        finalize_h264_video(video, video_path)
     displacement = float(robot.data.root_pos_w[0, 0].item() - start_pos[0].item())
     metrics = {
         "policy": str(args.policy), "command": [args.command_x, args.command_y, args.command_yaw],

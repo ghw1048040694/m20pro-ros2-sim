@@ -19,6 +19,7 @@ import h5py
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 DEFAULT_OUTPUT_ROOT = Path(
     os.environ.get(
@@ -276,7 +277,7 @@ def main() -> None:
             h5.attrs["max_root_height"] = max_height
             h5.attrs["min_root_height"] = min_height
             h5.attrs["success"] = bool(max_height >= 0.80 and min_height >= 0.35)
-        video.release()
+        finalize_h264_video(video, video_path)
         success = max_height >= 0.80 and min_height >= 0.35
         print(
             f"[M20PRO-EXPERT] episode={episode} max_root_height={max_height:.4f} m "

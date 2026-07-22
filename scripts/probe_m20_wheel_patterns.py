@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--steps", type=int, default=150)
@@ -129,12 +130,14 @@ def main() -> None:
     min_height = robot.data.root_pos_w[:, 2].clone()
     max_abs_angular_velocity = torch.zeros(len(PATTERNS), device=robot.device)
     videos = []
+    video_paths = []
     for index in range(len(PATTERNS)):
         path = args.video_dir / f"pattern_{index:02d}.mp4"
         video = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
         if not video.isOpened():
             raise RuntimeError(f"Unable to open video writer: {path}")
         videos.append(video)
+        video_paths.append(path)
     try:
         for _ in range(args.steps):
             robot.set_joint_position_target(default_pose[:, :12], joint_ids=leg_ids)
@@ -151,8 +154,8 @@ def main() -> None:
             min_height = torch.minimum(min_height, robot.data.root_pos_w[:, 2])
             max_abs_angular_velocity = torch.maximum(max_abs_angular_velocity, robot.data.root_ang_vel_b.abs().max(dim=1).values)
     finally:
-        for video in videos:
-            video.release()
+        for video, path in zip(videos, video_paths):
+            finalize_h264_video(video, path)
     final_yaw = yaw_from_quaternion(robot.data.root_quat_w)
     yaw_delta = torch.atan2(torch.sin(final_yaw - start_yaw), torch.cos(final_yaw - start_yaw))
     rows = []

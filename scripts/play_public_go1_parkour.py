@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
 DEFAULT_CHECKPOINT = DATA_ROOT / "public_experts/parkour_go1/skill/model_674000.pt"
@@ -323,7 +324,7 @@ def main() -> None:
             max_action = max(max_action, float(actions.abs().max().item()))
             min_depth = min(min_depth, float(depth.min().item()))
     finally:
-        video.release()
+        finalize_h264_video(video, video_path)
     end_x = float(robot.data.root_pos_w[0, 0].item())
     print(f"[M20PRO-PARKOUR-PLAY] policy_mode={args.policy_mode} checkpoint={args.checkpoint}", flush=True)
     print(f"[M20PRO-PARKOUR-PLAY] obstacle_height={args.obstacle_height:.3f} m", flush=True)

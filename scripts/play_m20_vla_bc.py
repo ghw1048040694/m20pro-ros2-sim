@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
@@ -412,7 +413,7 @@ def main() -> None:
             current_yaw = float(np.arctan2(2.0 * (quat[0] * quat[3] + quat[1] * quat[2]), 1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2)))
             yaw_delta = float(np.arctan2(np.sin(current_yaw - start_yaw), np.cos(current_yaw - start_yaw)))
     finally:
-        video.release()
+        finalize_h264_video(video, video_path)
     displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
     final_target_distance = (
         float(torch.linalg.vector_norm(

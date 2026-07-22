@@ -415,6 +415,14 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - 绿色目标 `(2.5, 0.4)` 复测失败：最小距离 `1.1601 m`，第 `99` 步误触发停止，`terminated_steps=0`；技能计数为 `left=26`、`forward_recovery=63`、`stop=211`。因此 v11 不能作为全场景导航成功版本，需先区分 GPU PhysX 非确定性和 search head/输入变化造成的行为偏移。
 - v11 search 扫描本身稳定：`120` 步全为 `search`，`min_root_height=0.515 m`、`terminated_steps=0`、`yaw_delta=-0.132 rad`；这仍不代表发现物体或完成 ObjectNav。
 
+### v12-v13 learned target stop 与视频兼容性（2026-07-22）
+
+- v7/v11 在当前闭环代码下都可重复复现绿色目标提前停车：第 `99` 步停止、最小距离 `1.1601 m`。因此该问题不是 search head 或单次 PhysX 随机性，而是旧 stop/command 输出在目标尚未进入 `0.8 m` 半径时过早衰减。
+- v12 从 v7 初始化并冻结导航主干，只训练独立 `target-stop head`；它仍在约 `1.12 m` 处误停。v13 将 head 扩为停止概率和归一化视觉距离联合监督，目标坐标和根位置只用于离线标签，推理仍只看前后 RGB、LiDAR、本体状态和语言。
+- v13 使用理论距离阈值 `0.16`（约 `0.8 m / 5 m`）时在 `1.1539 m` 误停；阈值降到 `0.10` 后不再触发 stop，但 command 回归头把前进速度降到接近零，最终仍停在 `1.1543 m`。因此不能把 v13 标记为成功；回放器现为尚未满足 learned stop 的 `forward` 技能设置 `0.08 m/s` 最小接近速度，待下一轮带视频复测。
+- 定位到此前全部 MP4 使用 OpenCV `mp4v`（MPEG-4 Part 2），文件本身完整但桌面播放器兼容性差。新增 [video_utils.py](scripts/video_utils.py) 和 [convert_videos_to_h264.py](scripts/convert_videos_to_h264.py)，所有 9 个录制/回放脚本在关闭视频后自动原子转为 `H.264/yuv420p + faststart`。
+- 2 TB 盘上的现有视频已批量转换：`49/49` 为 H.264、逐文件首帧解码失败数 `0`；`47` 个旧视频完成转换、`2` 个已是 H.264 而跳过，视频目录从约 `40 MB` 降到 `11 MB`。
+
 ## 待办路线
 
 1. 为高层增加真实 `search` 轨迹和后视相机闭环：目标放在侧后方，训练转向/扫描/重新获取目标，而不是把横向进入半径当作成功。

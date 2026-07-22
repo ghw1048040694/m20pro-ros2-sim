@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from isaaclab.app import AppLauncher
+from video_utils import finalize_h264_video
 
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
@@ -45,6 +46,7 @@ parser.add_argument("--max-turn-steps", type=int, default=8, help="Maximum conse
 parser.add_argument("--turn-recovery-steps", type=int, default=20, help="Forward frames used after the turn watchdog trips.")
 parser.add_argument("--max-yaw-command", type=float, default=0.25)
 parser.add_argument("--max-forward-command", type=float, default=0.35)
+parser.add_argument("--min-forward-command", type=float, default=0.08, help="Minimum approach speed until the learned target-stop gate fires.")
 parser.add_argument("--search-yaw-command", type=float, default=0.5)
 parser.add_argument("--search-threshold", type=float, default=0.5)
 parser.add_argument("--model-device", default="cpu")
@@ -58,7 +60,7 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if not args.video:
     parser.error("--video is required so every replay leaves an inspectable MP4")
-if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0 or not 0.0 < args.target_threshold < 1.0 or not 0.0 < args.target_distance_threshold < 1.0:
+if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0 or not 0.0 < args.target_threshold < 1.0 or not 0.0 < args.target_distance_threshold < 1.0 or not 0.0 < args.min_forward_command <= args.max_forward_command:
     parser.error("--steps must be positive and timing values must be non-negative")
 if not args.checkpoint.is_file():
     parser.error(f"skill checkpoint not found: {args.checkpoint}")
@@ -360,7 +362,11 @@ def main() -> None:
                         cached_command = (0.0, 0.0, -min(max(abs(float(command_np[2])), 0.12), args.max_yaw_command))
                 elif cached_skill == "forward":
                     turn_streak = 0
-                    cached_command = (min(max(float(command_np[0]), 0.0), args.max_forward_command), 0.0, 0.0)
+                    cached_command = (
+                        min(max(float(command_np[0]), args.min_forward_command), args.max_forward_command),
+                        0.0,
+                        0.0,
+                    )
                 elif cached_skill == "backward":
                     turn_streak = 0
                     cached_command = (max(min(float(command_np[0]), 0.0), -args.max_forward_command), 0.0, 0.0)
@@ -433,7 +439,7 @@ def main() -> None:
                     target_reached = True
                     target_reached_step = step
     finally:
-        video.release()
+        finalize_h264_video(video, video_path)
     displacement = (robot.data.root_pos_w[0, :2] - start_xy).detach().cpu().numpy()
     current_quat = robot.data.root_quat_w[0].detach().cpu().numpy()
     current_yaw = float(np.arctan2(2.0 * (current_quat[0] * current_quat[3] + current_quat[1] * current_quat[2]), 1.0 - 2.0 * (current_quat[2] ** 2 + current_quat[3] ** 2)))
@@ -454,6 +460,7 @@ def main() -> None:
         "stop_vote_window": args.stop_vote_window, "stop_vote_fraction": args.stop_vote_fraction,
         "max_turn_steps": args.max_turn_steps, "turn_recovery_steps": args.turn_recovery_steps,
         "max_yaw_command": args.max_yaw_command, "max_forward_command": args.max_forward_command,
+        "min_forward_command": args.min_forward_command,
         "search_yaw_command": args.search_yaw_command,
         "search_threshold": args.search_threshold, "search_head": search_head, "target_head": target_head,
         "displacement_xy": displacement.tolist(), "yaw_delta": yaw_delta,
