@@ -19,12 +19,18 @@ class M20VLASkillPolicy(nn.Module):
     verified demonstrations are added.
     """
 
-    def __init__(self, architecture: str = "spatial_v2", search_head: bool = False):
+    def __init__(
+        self,
+        architecture: str = "spatial_v2",
+        search_head: bool = False,
+        target_head: bool = False,
+    ):
         super().__init__()
         if architecture not in {"global_v1", "spatial_v2"}:
             raise ValueError(f"Unsupported architecture: {architecture}")
         self.architecture = architecture
         self.search_head_enabled = search_head
+        self.target_head_enabled = target_head
         image_pool = nn.AdaptiveAvgPool2d(1) if architecture == "global_v1" else nn.AdaptiveAvgPool2d((3, 5))
         self.image = nn.Sequential(
             nn.Conv2d(6, 24, kernel_size=5, stride=2, padding=2),
@@ -64,6 +70,11 @@ class M20VLASkillPolicy(nn.Module):
         self.search_head = (
             nn.Sequential(nn.Linear(24, 32), nn.GELU(), nn.Linear(32, 1)) if search_head else None
         )
+        self.target_head = (
+            nn.Sequential(nn.Linear(256, 64), nn.LayerNorm(64), nn.GELU(), nn.Linear(64, 2))
+            if target_head
+            else None
+        )
 
     def forward(
         self,
@@ -86,7 +97,12 @@ class M20VLASkillPolicy(nn.Module):
         fused = self.fusion(torch.cat((image_feature, lidar_feature, proprio_feature, language_feature), dim=-1))
         command = torch.tanh(self.command_head(fused))
         skill_logits = self.skill_head(fused)
-        if self.search_head is None:
+        if self.search_head is None and self.target_head is None:
             return command, skill_logits
-        search_feature = (language_embedding * mask).sum(1) / mask.sum(1).clamp_min(1)
-        return command, skill_logits, self.search_head(search_feature).squeeze(-1)
+        outputs = [command, skill_logits]
+        if self.search_head is not None:
+            search_feature = (language_embedding * mask).sum(1) / mask.sum(1).clamp_min(1)
+            outputs.append(self.search_head(search_feature).squeeze(-1))
+        if self.target_head is not None:
+            outputs.append(self.target_head(fused).squeeze(-1))
+        return tuple(outputs)

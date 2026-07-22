@@ -44,6 +44,8 @@ parser.add_argument("--init-checkpoint", type=Path, default=None)
 parser.add_argument("--freeze-backbone", action="store_true", help="Train only skill_head; used to add skills without forgetting navigation.")
 parser.add_argument("--search-head", action="store_true", help="Add an isolated language search-intent head.")
 parser.add_argument("--search-loss-weight", type=float, default=1.0)
+parser.add_argument("--target-head", action="store_true", help="Add a learned target-reached stop head.")
+parser.add_argument("--target-loss-weight", type=float, default=1.0)
 args = parser.parse_args()
 if args.freeze_backbone and args.init_checkpoint is None:
     parser.error("--freeze-backbone requires --init-checkpoint")
@@ -58,6 +60,9 @@ class Episode:
     lidar: np.ndarray
     proprio: np.ndarray
     command: np.ndarray
+    target_stop: np.ndarray
+    target_distance: np.ndarray
+    target_mask: np.ndarray
 
 
 def seed_everything(seed: int) -> None:
@@ -108,6 +113,7 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                 rear = downsample_rgb(np.asarray(obs["rear_rgb"], dtype=np.uint8))
                 lidar = np.asarray(obs["lidar"], dtype=np.float32)
                 proprio = np.asarray(obs["proprio"], dtype=np.float32)
+                state = np.asarray(obs["state"], dtype=np.float32) if "state" in obs else None
                 # Do not expose either the expert's command or its previous
                 # low-level action to the high-level policy.  At replay time
                 # those values come from the learned two-layer controller.
@@ -118,17 +124,29 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                 else:
                     command = np.repeat(np.asarray(h5.attrs.get("command", (0.0, 0.0, 0.0)), dtype=np.float32)[None], len(front), axis=0)
                 target_step = int(h5.attrs.get("target_reached_step", -1))
+                target_stop = np.zeros(len(command), dtype=np.float32)
+                if target_step >= 0:
+                    target_stop[min(target_step + 1, len(target_stop)) :] = 1.0
+                target_xy = np.asarray(h5.attrs.get("target_xy", (0.0, 0.0)), dtype=np.float32)
+                has_target = str(h5.attrs.get("target_color", "none")) != "none" and state is not None
+                target_distance = (
+                    np.linalg.norm(state[:, :2] - target_xy[None, :], axis=1).astype(np.float32)
+                    if has_target
+                    else np.zeros(len(command), dtype=np.float32)
+                )
+                target_mask = np.full(len(command), 1.0 if has_target else 0.0, dtype=np.float32)
                 if target_step >= 0 and bool(h5.attrs.get("stop_on_target", False)):
                     end = min(len(command), target_step + 1 + args.post_reach_steps)
-                    front, rear, lidar, proprio, command = (
-                        front[:end], rear[:end], lidar[:end], proprio[:end], command[:end]
+                    front, rear, lidar, proprio, command, target_stop, target_distance, target_mask = (
+                        front[:end], rear[:end], lidar[:end], proprio[:end], command[:end],
+                        target_stop[:end], target_distance[:end], target_mask[:end]
                     )
                     command[target_step + 1 :] = 0.0
-                if not (len(front) == len(rear) == len(lidar) == len(proprio) == len(command)):
+                if not (len(front) == len(rear) == len(lidar) == len(proprio) == len(command) == len(target_stop) == len(target_distance) == len(target_mask)):
                     raise ValueError(f"Length mismatch in {path}")
                 if len(command) == 0 or not all(np.isfinite(x).all() for x in (lidar, proprio, command)):
                     raise ValueError(f"Non-finite or empty episode: {path}")
-                episodes.append(Episode(path, task_text, front, rear, lidar, proprio, command))
+                episodes.append(Episode(path, task_text, front, rear, lidar, proprio, command, target_stop, target_distance, target_mask))
     if not episodes:
         raise RuntimeError("No successful M20 expert episodes available")
     return episodes
@@ -177,6 +195,11 @@ class FrameDataset(Dataset):
                 1.0 if any(token in episode.task_text for token in ("寻找", "搜索", "扫描")) else 0.0,
                 dtype=torch.float32,
             ),
+            "target_stop": torch.tensor(episode.target_stop[step], dtype=torch.float32),
+            "target_distance": torch.tensor(
+                np.clip(episode.target_distance[step] / 5.0, 0.0, 1.0), dtype=torch.float32
+            ),
+            "target_mask": torch.tensor(episode.target_mask[step], dtype=torch.float32),
         }
 
 
@@ -186,28 +209,47 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
     skill_weight: torch.Tensor,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float, float]:
     training = optimizer is not None
     model.train(training)
-    command_total = skill_total = correct = count = 0.0
+    command_total = skill_total = search_total = target_total = correct = count = 0.0
     for batch in loader:
         batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
         with torch.set_grad_enabled(training):
             outputs = model(batch["rgb"], batch["lidar"], batch["proprio"], batch["language"])
-            if args.search_head:
-                command_pred, skill_logits, search_logit = outputs
-            else:
-                command_pred, skill_logits = outputs
+            output_index = 2
+            command_pred, skill_logits = outputs[:2]
+            search_logit = outputs[output_index] if args.search_head else None
+            output_index += int(args.search_head)
+            target_output = outputs[output_index] if args.target_head else None
             command_loss = nn.functional.smooth_l1_loss(command_pred, batch["command"])
             skill_loss = nn.functional.cross_entropy(skill_logits, batch["skill"], weight=skill_weight)
-            search_loss = (
-                nn.functional.binary_cross_entropy_with_logits(search_logit, batch["search_target"])
-                if args.search_head else torch.zeros((), device=device)
-            )
+            search_loss = nn.functional.binary_cross_entropy_with_logits(
+                search_logit, batch["search_target"]
+            ) if args.search_head else torch.zeros((), device=device)
+            if args.target_head:
+                target_logit = target_output[:, 0]
+                target_distance_pred = torch.sigmoid(target_output[:, 1])
+                target_bce = nn.functional.binary_cross_entropy_with_logits(
+                    target_logit,
+                    batch["target_stop"],
+                    pos_weight=torch.tensor(4.0, device=device),
+                )
+                distance_error = nn.functional.smooth_l1_loss(
+                    target_distance_pred, batch["target_distance"], reduction="none"
+                )
+                target_distance_loss = (
+                    (distance_error * batch["target_mask"]).sum()
+                    / batch["target_mask"].sum().clamp_min(1.0)
+                )
+                target_loss = target_bce + target_distance_loss
+            else:
+                target_loss = torch.zeros((), device=device)
             loss = (
                 args.command_loss_weight * command_loss
                 + args.skill_loss_weight * skill_loss
                 + args.search_loss_weight * search_loss
+                + args.target_loss_weight * target_loss
             )
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -217,9 +259,17 @@ def run_epoch(
         size = float(batch["skill"].shape[0])
         command_total += float(command_loss.detach()) * size
         skill_total += float(skill_loss.detach()) * size
+        search_total += float(search_loss.detach()) * size
+        target_total += float(target_loss.detach()) * size
         correct += float((skill_logits.argmax(-1) == batch["skill"]).sum())
         count += size
-    return command_total / max(count, 1.0), skill_total / max(count, 1.0), correct / max(count, 1.0)
+    return (
+        command_total / max(count, 1.0),
+        skill_total / max(count, 1.0),
+        search_total / max(count, 1.0),
+        target_total / max(count, 1.0),
+        correct / max(count, 1.0),
+    )
 
 
 def main() -> None:
@@ -252,14 +302,19 @@ def main() -> None:
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True) if val_set else None
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
     skill_weight = skill_weight.to(device)
-    model = M20VLASkillPolicy(args.architecture, search_head=args.search_head).to(device)
+    model = M20VLASkillPolicy(
+        args.architecture, search_head=args.search_head, target_head=args.target_head
+    ).to(device)
     if args.init_checkpoint is not None:
         payload = torch.load(args.init_checkpoint, map_location=device, weights_only=True)
         model.load_state_dict(payload["model_state_dict"], strict=False)
     if args.freeze_backbone:
         for name, parameter in model.named_parameters():
-            parameter.requires_grad = name.startswith("search_head.") if args.search_head else (
-                name.startswith("language.") or name.startswith("skill_head.")
+            parameter.requires_grad = (
+                (args.search_head and name.startswith("search_head."))
+                or (args.target_head and name.startswith("target_head."))
+                if (args.search_head or args.target_head)
+                else (name.startswith("language.") or name.startswith("skill_head."))
             )
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
@@ -285,23 +340,32 @@ def main() -> None:
         "freeze_backbone": args.freeze_backbone,
         "search_head": args.search_head,
         "search_loss_weight": args.search_loss_weight,
+        "target_head": args.target_head,
+        "target_loss_weight": args.target_loss_weight,
         "seed": args.seed,
     }
     (args.output_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
     best = float("inf")
     history = []
     for epoch in range(1, args.epochs + 1):
-        train_cmd, train_skill, train_acc = run_epoch(model, train_loader, optimizer, device, skill_weight)
+        train_cmd, train_skill, train_search, train_target, train_acc = run_epoch(model, train_loader, optimizer, device, skill_weight)
         if val_loader is not None:
-            val_cmd, val_skill, val_acc = run_epoch(model, val_loader, None, device, skill_weight)
+            val_cmd, val_skill, val_search, val_target, val_acc = run_epoch(model, val_loader, None, device, skill_weight)
         else:
-            val_cmd, val_skill, val_acc = train_cmd, train_skill, train_acc
+            val_cmd, val_skill, val_search, val_target, val_acc = train_cmd, train_skill, train_search, train_target, train_acc
         scheduler.step()
-        total_val = args.command_loss_weight * val_cmd + args.skill_loss_weight * val_skill
+        total_val = (
+            args.command_loss_weight * val_cmd
+            + args.skill_loss_weight * val_skill
+            + args.search_loss_weight * val_search
+            + args.target_loss_weight * val_target
+        )
         row = {"epoch": epoch, "train_command_loss": train_cmd, "train_skill_loss": train_skill, "train_skill_accuracy": train_acc,
-               "val_command_loss": val_cmd, "val_skill_loss": val_skill, "val_skill_accuracy": val_acc, "lr": scheduler.get_last_lr()[0]}
+               "train_search_loss": train_search, "train_target_loss": train_target,
+               "val_command_loss": val_cmd, "val_skill_loss": val_skill, "val_search_loss": val_search,
+               "val_target_loss": val_target, "val_skill_accuracy": val_acc, "lr": scheduler.get_last_lr()[0]}
         history.append(row)
-        print(f"[M20PRO-SKILL] epoch={epoch:03d}/{args.epochs} train_cmd={train_cmd:.5f} train_acc={train_acc:.3f} val_cmd={val_cmd:.5f} val_acc={val_acc:.3f}", flush=True)
+        print(f"[M20PRO-SKILL] epoch={epoch:03d}/{args.epochs} train_cmd={train_cmd:.5f} train_acc={train_acc:.3f} val_cmd={val_cmd:.5f} val_target={val_target:.5f} val_acc={val_acc:.3f}", flush=True)
         if total_val <= best:
             best = total_val
             torch.save({"model_state_dict": model.state_dict(), "config": config, "epoch": epoch, "val_loss": total_val}, args.output_dir / "best.pt")

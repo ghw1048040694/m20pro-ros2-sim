@@ -36,6 +36,8 @@ parser.add_argument("--steps", type=int, default=300)
 parser.add_argument("--warmup-steps", type=int, default=75)
 parser.add_argument("--command-hold-steps", type=int, default=1)
 parser.add_argument("--stop-threshold", type=float, default=0.65)
+parser.add_argument("--target-threshold", type=float, default=0.65, help="Target-stop head probability required to latch stop.")
+parser.add_argument("--target-distance-threshold", type=float, default=0.16, help="Normalized predicted target distance required to latch stop (0.16 ~= 0.8 m).")
 parser.add_argument("--stop-confirm-steps", type=int, default=8, help="Consecutive high-confidence frames required before latching stop.")
 parser.add_argument("--stop-vote-window", type=int, default=15)
 parser.add_argument("--stop-vote-fraction", type=float, default=0.60)
@@ -56,7 +58,7 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if not args.video:
     parser.error("--video is required so every replay leaves an inspectable MP4")
-if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0:
+if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0 or not 0.0 < args.target_threshold < 1.0 or not 0.0 < args.target_distance_threshold < 1.0:
     parser.error("--steps must be positive and timing values must be non-negative")
 if not args.checkpoint.is_file():
     parser.error(f"skill checkpoint not found: {args.checkpoint}")
@@ -225,7 +227,10 @@ def main() -> None:
     payload = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     config = payload.get("config", {})
     search_head = bool(config.get("search_head", False))
-    model = M20VLASkillPolicy(config.get("architecture", "spatial_v2"), search_head=search_head)
+    target_head = bool(config.get("target_head", False))
+    model = M20VLASkillPolicy(
+        config.get("architecture", "spatial_v2"), search_head=search_head, target_head=target_head
+    )
     model.load_state_dict(payload["model_state_dict"], strict=False)
     model_device = torch.device(args.model_device if torch.cuda.is_available() or not args.model_device.startswith("cuda") else "cpu")
     model.to(model_device).eval()
@@ -305,15 +310,33 @@ def main() -> None:
                 proprio = high_level_proprio(robot, joint_ids, last_low_level_action).to(model_device)
                 with torch.inference_mode():
                     outputs = model(rgb, scan, proprio, language)
+                    output_index = 2
+                    command_norm, skill_logits = outputs[:2]
                     if search_head:
-                        command_norm, skill_logits, search_logit = outputs
-                        search_probability = float(torch.sigmoid(search_logit[0]).item())
+                        search_probability = float(torch.sigmoid(outputs[output_index][0]).item())
+                        output_index += 1
                     else:
-                        command_norm, skill_logits = outputs
                         search_probability = 0.0
+                    if target_head:
+                        target_stop_probability = float(torch.sigmoid(outputs[output_index][0, 0]).item())
+                        target_distance_prediction = float(torch.sigmoid(outputs[output_index][0, 1]).item())
+                    else:
+                        target_stop_probability = 0.0
+                        target_distance_prediction = 1.0
                 command_np = (command_norm[0].detach().cpu().numpy() * COMMAND_SCALE.numpy()).astype(np.float32)
                 skill_index = int(skill_logits[0].argmax().item())
-                cached_skill = "search" if search_probability >= args.search_threshold else SKILL_NAMES[skill_index]
+                predicted_skill = SKILL_NAMES[skill_index]
+                if target_head:
+                    # The target head is trained from frame-level reached labels;
+                    # do not allow the imbalanced generic stop class to stop early.
+                    target_stop_candidate = (
+                        target_stop_probability >= args.target_threshold
+                        and target_distance_prediction <= args.target_distance_threshold
+                    )
+                    predicted_skill = "stop" if target_stop_candidate else predicted_skill
+                    if predicted_skill == "stop" and not target_stop_candidate:
+                        predicted_skill = "forward"
+                cached_skill = "search" if search_probability >= args.search_threshold else predicted_skill
                 # Turn/translation are canonicalized before reaching the
                 # native expert.  This keeps regression noise in the command
                 # head from turning a discrete skill into a curved skid.
@@ -354,7 +377,11 @@ def main() -> None:
                     cached_command = (0.0, 0.0, 0.0) if stop_latched else last_nonstop_command
                 else:
                     turn_streak = 0
-                stop_probability = float(torch.softmax(skill_logits, dim=-1)[0, SKILL_NAMES.index("stop")].item())
+                stop_probability = (
+                    target_stop_probability
+                    if target_head and target_distance_prediction <= args.target_distance_threshold
+                    else float(torch.softmax(skill_logits, dim=-1)[0, SKILL_NAMES.index("stop")].item())
+                )
                 if stop_probability >= args.stop_threshold and cached_skill == "stop":
                     stop_confidence_streak += 1
                     stop_votes.append(True)
@@ -369,7 +396,7 @@ def main() -> None:
                 if cached_skill not in {"stop", "search", "jump"} and cached_skill != "forward_recovery":
                     last_nonstop_command = cached_command
                 if args.debug_steps and step < args.debug_steps:
-                    print(f"[M20PRO-SKILL-DEBUG] step={step} skill={cached_skill} search_p={search_probability:.3f} stop_p={stop_probability:.3f} command={cached_command}", flush=True)
+                    print(f"[M20PRO-SKILL-DEBUG] step={step} skill={cached_skill} search_p={search_probability:.3f} target_stop_p={target_stop_probability:.3f} target_dist_p={target_distance_prediction:.3f} stop_p={stop_probability:.3f} command={cached_command}", flush=True)
             command = (0.0, 0.0, 0.0) if stop_latched else cached_command
             command_sum += np.asarray(command)
             command_count += 1
@@ -421,12 +448,14 @@ def main() -> None:
         "task_text": args.task_text, "target_color": args.target_color,
         "target_xy": [args.target_x, args.target_y] if args.target_color != "none" else None,
         "target_coordinates_used_by_policy": False, "steps": args.steps, "command_hold_steps": args.command_hold_steps,
-        "stop_threshold": args.stop_threshold, "stop_confirm_steps": args.stop_confirm_steps,
+        "stop_threshold": args.stop_threshold, "target_threshold": args.target_threshold,
+        "target_distance_threshold": args.target_distance_threshold,
+        "stop_confirm_steps": args.stop_confirm_steps,
         "stop_vote_window": args.stop_vote_window, "stop_vote_fraction": args.stop_vote_fraction,
         "max_turn_steps": args.max_turn_steps, "turn_recovery_steps": args.turn_recovery_steps,
         "max_yaw_command": args.max_yaw_command, "max_forward_command": args.max_forward_command,
         "search_yaw_command": args.search_yaw_command,
-        "search_threshold": args.search_threshold, "search_head": search_head,
+        "search_threshold": args.search_threshold, "search_head": search_head, "target_head": target_head,
         "displacement_xy": displacement.tolist(), "yaw_delta": yaw_delta,
         "min_root_height": min_height, "max_root_height": max_height, "terminated_steps": terminated_steps,
         "target_reached": target_reached, "target_reached_step": target_reached_step,
