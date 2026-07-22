@@ -33,12 +33,31 @@ parser.add_argument("--task-text", default="到红色方块去")
 parser.add_argument("--target-color", choices=["none", "red", "blue", "green"], default="red")
 parser.add_argument("--target-x", type=float, default=2.5)
 parser.add_argument("--target-y", type=float, default=0.0)
+parser.add_argument("--target-radius", type=float, default=0.8)
+parser.add_argument(
+    "--target-hold-steps",
+    type=int,
+    default=100,
+    help="Required consecutive 50 Hz frames inside the target radius after stop latches.",
+)
 parser.add_argument("--steps", type=int, default=300)
 parser.add_argument("--warmup-steps", type=int, default=75)
 parser.add_argument("--command-hold-steps", type=int, default=1)
 parser.add_argument("--stop-threshold", type=float, default=0.65)
 parser.add_argument("--target-threshold", type=float, default=0.65, help="Target-stop head probability required to latch stop.")
 parser.add_argument("--target-distance-threshold", type=float, default=0.16, help="Normalized predicted target distance required to latch stop (0.16 ~= 0.8 m).")
+parser.add_argument(
+    "--target-turnaround-window",
+    type=int,
+    default=0,
+    help="If positive, require learned distance to rise from a recent minimum before stop confirmation.",
+)
+parser.add_argument(
+    "--target-turnaround-rise-m",
+    type=float,
+    default=0.03,
+    help="Learned-distance rise from the recent minimum required by turnaround mode.",
+)
 parser.add_argument("--stop-confirm-steps", type=int, default=8, help="Consecutive high-confidence frames required before latching stop.")
 parser.add_argument("--stop-vote-window", type=int, default=15)
 parser.add_argument("--stop-vote-fraction", type=float, default=0.60)
@@ -60,7 +79,7 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if not args.video:
     parser.error("--video is required so every replay leaves an inspectable MP4")
-if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0 or not 0.0 < args.target_threshold < 1.0 or not 0.0 < args.target_distance_threshold < 1.0 or not 0.0 < args.min_forward_command <= args.max_forward_command:
+if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.target_radius <= 0.0 or args.target_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0 or not 0.0 < args.target_threshold < 1.0 or not 0.0 < args.target_distance_threshold < 1.0 or args.target_turnaround_window < 0 or args.target_turnaround_rise_m < 0.0 or not 0.0 < args.min_forward_command <= args.max_forward_command:
     parser.error("--steps must be positive and timing values must be non-negative")
 if not args.checkpoint.is_file():
     parser.error(f"skill checkpoint not found: {args.checkpoint}")
@@ -288,9 +307,14 @@ def main() -> None:
     )
     target_reached = args.target_color == "none"
     target_reached_step = None
+    post_stop_target_hold_streak = 0
+    max_post_stop_target_hold_steps = 0
     stop_triggered_step = None
     stop_confidence_streak = 0
     stop_votes: deque[bool] = deque(maxlen=args.stop_vote_window)
+    target_distance_history: deque[float] = deque(
+        maxlen=max(args.target_turnaround_window, 1)
+    )
     terminated_steps = 0
     command_sum = np.zeros(3, dtype=np.float64)
     command_count = 0
@@ -322,12 +346,14 @@ def main() -> None:
                 search_remaining -= 1
                 stop_confidence_streak = 0
                 stop_votes.clear()
+                target_distance_history.clear()
             elif recovery_remaining > 0:
                 cached_skill = "forward_recovery"
                 cached_command = (args.max_forward_command, 0.0, 0.0)
                 recovery_remaining -= 1
                 stop_confidence_streak = 0
                 stop_votes.clear()
+                target_distance_history.clear()
             elif step % args.command_hold_steps == 0:
                 front_image = rgb_small(front)
                 rear_image = rgb_small(rear)
@@ -354,12 +380,28 @@ def main() -> None:
                 raw_skill = SKILL_NAMES[skill_index]
                 predicted_skill = raw_skill
                 target_stop_candidate = False
+                target_turnaround_candidate = False
+                target_recent_min_distance = None
                 if target_head:
                     # The target head is trained from frame-level reached labels;
                     # do not allow the imbalanced generic stop class to stop early.
+                    target_distance_gate = (
+                        target_distance_prediction <= args.target_distance_threshold
+                    )
+                    if args.target_turnaround_window > 0:
+                        target_distance_history.append(target_distance_prediction)
+                        target_recent_min_distance = min(target_distance_history)
+                        target_turnaround_candidate = (
+                            len(target_distance_history) >= 4
+                            and target_recent_min_distance <= args.target_distance_threshold
+                            and target_distance_prediction
+                            >= target_recent_min_distance
+                            + args.target_turnaround_rise_m / target_distance_scale_m
+                        )
+                        target_distance_gate = target_turnaround_candidate
                     target_stop_candidate = (
                         target_stop_probability >= args.target_threshold
-                        and target_distance_prediction <= args.target_distance_threshold
+                        and target_distance_gate
                     )
                     predicted_skill = "stop" if target_stop_candidate else predicted_skill
                     if predicted_skill == "stop" and not target_stop_candidate:
@@ -414,7 +456,7 @@ def main() -> None:
                 )
                 stop_probability = (
                     target_stop_probability
-                    if target_head and target_distance_prediction <= args.target_distance_threshold
+                    if target_head and target_distance_gate
                     else generic_stop_probability
                 )
                 if stop_probability >= args.stop_threshold and cached_skill == "stop":
@@ -475,6 +517,15 @@ def main() -> None:
                         "raw_skill": raw_skill,
                         "selected_skill": cached_skill,
                         "target_stop_candidate": target_stop_candidate,
+                        "target_distance_gate": target_distance_gate if target_head else None,
+                        "target_turnaround_candidate": (
+                            target_turnaround_candidate if target_head else None
+                        ),
+                        "target_recent_min_distance_m": (
+                            None
+                            if target_recent_min_distance is None
+                            else target_recent_min_distance * target_distance_scale_m
+                        ),
                         "stop_latched": stop_latched,
                         "command": list(cached_command),
                     }
@@ -514,9 +565,16 @@ def main() -> None:
                     torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy_eval).item()
                 )
                 min_target_distance = min(min_target_distance, distance)
-                if not target_reached and distance <= 0.8:
+                if not target_reached and distance <= args.target_radius:
                     target_reached = True
                     target_reached_step = step
+                if stop_latched and distance <= args.target_radius:
+                    post_stop_target_hold_streak += 1
+                    max_post_stop_target_hold_steps = max(
+                        max_post_stop_target_hold_steps, post_stop_target_hold_streak
+                    )
+                elif stop_latched:
+                    post_stop_target_hold_streak = 0
     finally:
         finalize_h264_video(video, video_path)
     displacement = (robot.data.root_pos_w[0, :2] - start_xy).detach().cpu().numpy()
@@ -529,14 +587,24 @@ def main() -> None:
             torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy_eval).item()
         )
     stable = terminated_steps == 0 and min_height >= 0.45
-    success = stable and (args.target_color == "none" or (target_reached and stop_triggered_step is not None))
+    success = stable and (
+        args.target_color == "none"
+        or (
+            target_reached
+            and stop_triggered_step is not None
+            and max_post_stop_target_hold_steps >= args.target_hold_steps
+        )
+    )
     metrics = {
         "format": "m20_vla_two_layer_replay_v2", "checkpoint": str(args.checkpoint), "low_level_policy": str(args.policy),
         "task_text": args.task_text, "target_color": args.target_color,
         "target_xy": [args.target_x, args.target_y] if args.target_color != "none" else None,
+        "target_radius": args.target_radius, "target_hold_steps_required": args.target_hold_steps,
         "target_coordinates_used_by_policy": False, "steps": args.steps, "command_hold_steps": args.command_hold_steps,
         "stop_threshold": args.stop_threshold, "target_threshold": args.target_threshold,
         "target_distance_threshold": args.target_distance_threshold,
+        "target_turnaround_window": args.target_turnaround_window,
+        "target_turnaround_rise_m": args.target_turnaround_rise_m,
         "stop_confirm_steps": args.stop_confirm_steps,
         "stop_vote_window": args.stop_vote_window, "stop_vote_fraction": args.stop_vote_fraction,
         "max_turn_steps": args.max_turn_steps, "turn_recovery_steps": args.turn_recovery_steps,
@@ -565,6 +633,7 @@ def main() -> None:
         "displacement_xy": displacement.tolist(), "yaw_delta": yaw_delta,
         "min_root_height": min_height, "max_root_height": max_height, "terminated_steps": terminated_steps,
         "target_reached": target_reached, "target_reached_step": target_reached_step,
+        "max_post_stop_target_hold_steps": max_post_stop_target_hold_steps,
         "stop_triggered_step": stop_triggered_step, "min_target_distance": None if args.target_color == "none" else min_target_distance,
         "final_target_distance": final_distance, "skill_counts": dict(skill_counts),
         "mean_command": (command_sum / max(command_count, 1)).tolist(), "success": success, "video": str(video_path),

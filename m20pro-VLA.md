@@ -430,7 +430,24 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - `play_m20_vla_skill.py` 的指标格式升级为 `m20_vla_two_layer_replay_v2`：每次高层推理保存真实评估距离、预测距离、target/generic stop 概率、原始/选中技能、命令和 stop latch 状态，并汇总预测距离最小值、stop 概率最大值及对应步数。目标坐标只用于评估 trace，仍未输入策略。
 - v13 绿色目标 `(2.5, 0.4)` 的 300 步 trace 复测再次进入目标半径，真实最小距离 `0.3348 m`、`terminated_steps=0`，但 `stop_step=None`。预测距离全程仅在 `2.1833–2.6376 m` 之间，真实/预测距离相关系数只有 `0.148`；在真实距离 `<=0.8 m` 的 69 个推理样本中仍预测 `2.1833–2.2021 m`，最大 target-stop 概率仅 `0.0036`。因此已确认是表征/泛化失败，不是继续猜 `0.10/0.14/0.16` 阈值能解决的问题。
 - v14 新增与动作主干隔离的 `visual_v2` target encoder，用独立 RGB 空间特征和语言特征预测停止概率/距离；v7 已验证的动作主干完全冻结。stop BCE 只在有目标帧上计算，标签严格定义为离线真实距离 `<=0.8 m`；冻结目标训练采用正负目标样本平衡，并允许只为目标感知使用物理稳定且曾进入目标半径的 DAgger 帧，不使用其失败后的动作作为控制专家。
-- `m20_vla_skill_v14_target_visual` 使用 20 条 episode，训练/验证分别为 `2350/775` 帧，训练目标标签为 `not_reached=1029`、`reached=71`；最佳 checkpoint 在第 36 轮，`val_target_loss=0.1170`。这只是离线改善，尚未通过绿色、红色和蓝色闭环带视频验收，不能标记为导航成功。
+- `m20_vla_skill_v14_target_visual` 使用 20 条 episode，训练/验证分别为 `2350/775` 帧，训练目标标签为 `not_reached=1029`、`reached=71`；最佳 checkpoint 在第 36 轮，`val_target_loss=0.1170`。训练刚结束时这还只是离线改善，随后才执行下述绿色、红色和蓝色闭环带视频验收。
+- v14 验证集目标距离回归相关系数为 `0.963`、MAE 为 `0.116 m`。单一绝对预测距离门限没有三色共同可靠区间：归一化 `0.32` 可让绿/红停车但蓝色不触发，`0.34` 又会让蓝色在真实约 `0.98 m` 处提前形成候选。因此停止确认改为 learned distance 时序门控：最近 20 次预测的最小值低于 `1.7 m`，随后回升至少 `0.03 m`，再使用原有 8 帧/投票确认；该门控只读取模型输出，不读取目标坐标。
+- 同一组时序参数完成三色带视频闭环：绿色 `(2.5,0.4)` 第 `109` 步停车，最小/最终距离 `0.4806 m`；红色 `(2.5,0.0)` 第 `134` 步停车，最小/最终距离 `0.1084 m`；蓝色 `(3.0,-0.75)` 第 `161` 步停车，最小/最终距离 `0.7894 m`。三条均 `target_reached=true`、`terminated_steps=0`，停车后分别保持 `111/86/119` 步。不过蓝色横向位移仅 `0.0358 m`，主要是在目标半径边缘停车，说明 learned stop 已通过这三条代表性场景，而任意横向位置的目标导向仍未完成。
+- 最终视频保存在 `videos/m20_vla_skill_v14/{green_left04_turnaround_v3,red_center_turnaround_v2,blue_right075_turnaround_v2}/`。删除 4 组被替代的 v14 中间视频/JSON 和 10 个与 `best.pt` 重复的 `last.pt` 后，checkpoint 从约 `27 MB` 降为 `14 MB`；2 TB 盘现有 `58/58` 个 MP4 均为 H.264，完整逐帧解码失败数为 `0`。
+
+v14 绿色目标复现命令（显式无头并录制视频）：
+
+```bash
+source scripts/activate_vla_env.sh
+python scripts/play_m20_vla_skill.py --headless --video \
+  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v14_target_visual/best.pt \
+  --task-text "到绿色方块去" --target-color green --target-x 2.5 --target-y 0.4 \
+  --steps 220 --target-distance-threshold 0.34 \
+  --target-turnaround-window 20 --target-turnaround-rise-m 0.03 \
+  --min-forward-command 0.08 \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_skill_v14/green_replay \
+  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_skill_v14_green_replay.json
+```
 
 ## 待办路线
 
