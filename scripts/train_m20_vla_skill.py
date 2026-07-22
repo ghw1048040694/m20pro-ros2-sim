@@ -52,6 +52,11 @@ parser.add_argument(
     action="store_true",
     help="With --freeze-backbone, also adapt command_head and skill_head while keeping sensor features fixed.",
 )
+parser.add_argument(
+    "--freeze-target-head",
+    action="store_true",
+    help="Keep an initialized target branch fixed while adapting navigation heads.",
+)
 parser.add_argument("--search-head", action="store_true", help="Add an isolated language search-intent head.")
 parser.add_argument("--search-loss-weight", type=float, default=1.0)
 parser.add_argument("--target-head", action="store_true", help="Add a learned target-reached stop head.")
@@ -68,6 +73,12 @@ if args.freeze_backbone and args.init_checkpoint is None:
     parser.error("--freeze-backbone requires --init-checkpoint")
 if args.train_navigation_heads and not args.freeze_backbone:
     parser.error("--train-navigation-heads requires --freeze-backbone")
+if args.freeze_target_head and not (
+    args.freeze_backbone and args.train_navigation_heads and args.target_head
+):
+    parser.error(
+        "--freeze-target-head requires --freeze-backbone, --train-navigation-heads and --target-head"
+    )
 if args.target_stop_pos_weight <= 0.0:
     parser.error("--target-stop-pos-weight must be positive")
 
@@ -372,7 +383,7 @@ def main() -> None:
     counts = torch.bincount(train_skills, minlength=len(SKILL_NAMES)).float()
     skill_weight = (counts.sum() / counts.clamp_min(1.0)).sqrt()
     skill_weight = (skill_weight / skill_weight.mean()).to(args.device if torch.cuda.is_available() else "cpu")
-    if args.target_head and args.freeze_backbone:
+    if args.target_head and args.freeze_backbone and not args.freeze_target_head:
         target_masks = torch.tensor(
             [
                 train_set.episodes[ep_id].target_mask[step]
@@ -421,6 +432,8 @@ def main() -> None:
                 trainable = name.startswith("language.") or name.startswith("skill_head.")
             if args.train_navigation_heads:
                 trainable = trainable or name.startswith(("command_head.", "skill_head."))
+            if args.freeze_target_head and name.startswith("target_"):
+                trainable = False
             parameter.requires_grad = trainable
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
@@ -445,6 +458,7 @@ def main() -> None:
         "init_checkpoint": None if args.init_checkpoint is None else str(args.init_checkpoint),
         "freeze_backbone": args.freeze_backbone,
         "train_navigation_heads": args.train_navigation_heads,
+        "freeze_target_head": args.freeze_target_head,
         "search_head": args.search_head,
         "search_loss_weight": args.search_loss_weight,
         "target_head": args.target_head,
