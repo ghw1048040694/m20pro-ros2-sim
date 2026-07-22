@@ -47,6 +47,12 @@ parser.add_argument("--stop-threshold", type=float, default=0.65)
 parser.add_argument("--target-threshold", type=float, default=0.65, help="Target-stop head probability required to latch stop.")
 parser.add_argument("--target-distance-threshold", type=float, default=0.16, help="Normalized predicted target distance required to latch stop (0.16 ~= 0.8 m).")
 parser.add_argument(
+    "--target-absolute-stop-distance-m",
+    type=float,
+    default=0.8,
+    help="Direct learned-distance stop condition; turnaround remains a fallback for biased scenes.",
+)
+parser.add_argument(
     "--target-turnaround-window",
     type=int,
     default=0,
@@ -58,9 +64,9 @@ parser.add_argument(
     default=0.03,
     help="Learned-distance rise from the recent minimum required by turnaround mode.",
 )
-parser.add_argument("--stop-confirm-steps", type=int, default=8, help="Consecutive high-confidence frames required before latching stop.")
+parser.add_argument("--stop-confirm-steps", type=int, default=12, help="Consecutive high-confidence frames required before latching stop.")
 parser.add_argument("--stop-vote-window", type=int, default=15)
-parser.add_argument("--stop-vote-fraction", type=float, default=0.60)
+parser.add_argument("--stop-vote-fraction", type=float, default=0.80)
 parser.add_argument("--max-turn-steps", type=int, default=8, help="Maximum consecutive VLA turn frames before forward recovery.")
 parser.add_argument("--turn-recovery-steps", type=int, default=20, help="Forward frames used after the turn watchdog trips.")
 parser.add_argument("--max-yaw-command", type=float, default=0.25)
@@ -68,6 +74,7 @@ parser.add_argument("--max-forward-command", type=float, default=0.35)
 parser.add_argument("--min-forward-command", type=float, default=0.08, help="Minimum approach speed until the learned target-stop gate fires.")
 parser.add_argument("--search-yaw-command", type=float, default=0.5)
 parser.add_argument("--search-threshold", type=float, default=0.5)
+parser.add_argument("--wheel-damping", type=float, default=0.6)
 parser.add_argument("--model-device", default="cpu")
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIR)
 parser.add_argument("--metrics", type=Path, default=None)
@@ -79,7 +86,7 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if not args.video:
     parser.error("--video is required so every replay leaves an inspectable MP4")
-if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.target_radius <= 0.0 or args.target_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0 or not 0.0 < args.target_threshold < 1.0 or not 0.0 < args.target_distance_threshold < 1.0 or args.target_turnaround_window < 0 or args.target_turnaround_rise_m < 0.0 or not 0.0 < args.min_forward_command <= args.max_forward_command:
+if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.target_radius <= 0.0 or args.target_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0 or args.search_yaw_command <= 0.0 or not 0.0 < args.search_threshold < 1.0 or not 0.0 < args.target_threshold < 1.0 or not 0.0 < args.target_distance_threshold < 1.0 or args.target_absolute_stop_distance_m < 0.0 or args.target_turnaround_window < 0 or args.target_turnaround_rise_m < 0.0 or args.wheel_damping <= 0.0 or not 0.0 < args.min_forward_command <= args.max_forward_command:
     parser.error("--steps must be positive and timing values must be non-negative")
 if not args.checkpoint.is_file():
     parser.error(f"skill checkpoint not found: {args.checkpoint}")
@@ -142,7 +149,7 @@ PUBLIC_M20_CFG = M20PRO_CFG.replace(
     actuators={
         "hipx": DCMotorCfg(joint_names_expr=[".*_hipx_joint"], effort_limit=32.4, saturation_effort=32.4, velocity_limit=45.0, stiffness=80.0, damping=2.0),
         "hipy_knee": DCMotorCfg(joint_names_expr=[".*_(hipy|knee)_joint"], effort_limit=76.4, saturation_effort=76.4, velocity_limit=22.4, stiffness=80.0, damping=2.0),
-        "wheels": DCMotorCfg(joint_names_expr=[".*_wheel_joint"], effort_limit=21.6, saturation_effort=21.6, velocity_limit=79.3, stiffness=0.0, damping=0.6),
+        "wheels": DCMotorCfg(joint_names_expr=[".*_wheel_joint"], effort_limit=21.6, saturation_effort=21.6, velocity_limit=79.3, stiffness=0.0, damping=args.wheel_damping),
     },
 )
 
@@ -326,6 +333,11 @@ def main() -> None:
     max_target_stop_probability_step = None
     target_distance_abs_error_sum = 0.0
     target_distance_error_count = 0
+    post_stop_planar_speed_sum = 0.0
+    post_stop_speed_samples = 0
+    max_post_stop_planar_speed = 0.0
+    final_post_stop_planar_speed = None
+    final_post_stop_mean_abs_wheel_speed = None
     video_path = args.video_dir / "m20-vla-skill-step-0.mp4"
     video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
     if not video.isOpened():
@@ -380,13 +392,19 @@ def main() -> None:
                 raw_skill = SKILL_NAMES[skill_index]
                 predicted_skill = raw_skill
                 target_stop_candidate = False
+                target_absolute_distance_candidate = False
                 target_turnaround_candidate = False
                 target_recent_min_distance = None
                 if target_head:
                     # The target head is trained from frame-level reached labels;
                     # do not allow the imbalanced generic stop class to stop early.
+                    target_absolute_distance_candidate = (
+                        target_distance_prediction * target_distance_scale_m
+                        <= args.target_absolute_stop_distance_m
+                    )
                     target_distance_gate = (
                         target_distance_prediction <= args.target_distance_threshold
+                        or target_absolute_distance_candidate
                     )
                     if args.target_turnaround_window > 0:
                         target_distance_history.append(target_distance_prediction)
@@ -398,7 +416,10 @@ def main() -> None:
                             >= target_recent_min_distance
                             + args.target_turnaround_rise_m / target_distance_scale_m
                         )
-                        target_distance_gate = target_turnaround_candidate
+                        target_distance_gate = (
+                            target_turnaround_candidate
+                            or target_absolute_distance_candidate
+                        )
                     target_stop_candidate = (
                         target_stop_probability >= args.target_threshold
                         and target_distance_gate
@@ -517,6 +538,9 @@ def main() -> None:
                         "raw_skill": raw_skill,
                         "selected_skill": cached_skill,
                         "target_stop_candidate": target_stop_candidate,
+                        "target_absolute_distance_candidate": (
+                            target_absolute_distance_candidate if target_head else None
+                        ),
                         "target_distance_gate": target_distance_gate if target_head else None,
                         "target_turnaround_candidate": (
                             target_turnaround_candidate if target_head else None
@@ -527,7 +551,8 @@ def main() -> None:
                             else target_recent_min_distance * target_distance_scale_m
                         ),
                         "stop_latched": stop_latched,
-                        "command": list(cached_command),
+                        "command": list((0.0, 0.0, 0.0) if stop_latched else cached_command),
+                        "executed_skill": "stop" if stop_latched else cached_skill,
                     }
                 )
                 if args.debug_steps and step < args.debug_steps:
@@ -535,18 +560,32 @@ def main() -> None:
             command = (0.0, 0.0, 0.0) if stop_latched else cached_command
             command_sum += np.asarray(command)
             command_count += 1
-            skill_counts[cached_skill] += 1
+            skill_counts["stop" if stop_latched else cached_skill] += 1
             low_level_command = command
-            mirror = args.mirror_negative_yaw and low_level_command[2] < -1e-6
-            policy_command = (low_level_command[0], low_level_command[1], abs(low_level_command[2])) if mirror else low_level_command
-            low_obs = native_observation(robot, joint_ids, last_low_level_action, policy_command, mirror=mirror)
-            action_np = session.run(["actions"], {"obs": low_obs.detach().cpu().numpy()})[0]
-            action = torch.from_numpy(action_np).to(robot.device, dtype=torch.float32)
-            if mirror:
-                action = mirror_action(action)
+            if stop_latched:
+                # The released locomotion expert does not hold still reliably
+                # for a zero command.  Return to the symmetric standing pose
+                # and explicitly command zero wheel speed as the stop primitive.
+                action = torch.zeros_like(last_low_level_action)
+            else:
+                mirror = args.mirror_negative_yaw and low_level_command[2] < -1e-6
+                policy_command = (
+                    (low_level_command[0], low_level_command[1], abs(low_level_command[2]))
+                    if mirror
+                    else low_level_command
+                )
+                low_obs = native_observation(
+                    robot, joint_ids, last_low_level_action, policy_command, mirror=mirror
+                )
+                action_np = session.run(["actions"], {"obs": low_obs.detach().cpu().numpy()})[0]
+                action = torch.from_numpy(action_np).to(robot.device, dtype=torch.float32)
+                if mirror:
+                    action = mirror_action(action)
             leg_target = default_pose[:, :12] + action[:, :12] * leg_scale
             robot.set_joint_position_target(leg_target, joint_ids=leg_ids)
-            robot.set_joint_velocity_target(action[:, 12:] * WHEEL_SCALE, joint_ids=wheel_ids)
+            wheel_target = action[:, 12:] * WHEEL_SCALE
+            robot.set_joint_velocity_target(wheel_target, joint_ids=wheel_ids)
+            robot.set_joint_effort_target(zero_wheels, joint_ids=wheel_ids)
             last_low_level_action = action
             camera_target = robot.data.root_pos_w + torch.tensor([[0.0, 0.0, 0.1]], device=robot.device)
             third.set_world_poses_from_view(camera_target + torch.tensor([[-1.4, 1.4, 0.85]], device=robot.device), camera_target)
@@ -560,6 +599,18 @@ def main() -> None:
             min_height, max_height = min(min_height, height), max(max_height, height)
             gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
             terminated_steps += int(height < 0.45 or gravity_z > -0.5)
+            if stop_latched:
+                final_post_stop_planar_speed = float(
+                    torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item()
+                )
+                final_post_stop_mean_abs_wheel_speed = float(
+                    robot.data.joint_vel[0, wheel_ids].abs().mean().item()
+                )
+                post_stop_planar_speed_sum += final_post_stop_planar_speed
+                post_stop_speed_samples += 1
+                max_post_stop_planar_speed = max(
+                    max_post_stop_planar_speed, final_post_stop_planar_speed
+                )
             if args.target_color != "none":
                 distance = float(
                     torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy_eval).item()
@@ -603,6 +654,7 @@ def main() -> None:
         "target_coordinates_used_by_policy": False, "steps": args.steps, "command_hold_steps": args.command_hold_steps,
         "stop_threshold": args.stop_threshold, "target_threshold": args.target_threshold,
         "target_distance_threshold": args.target_distance_threshold,
+        "target_absolute_stop_distance_m": args.target_absolute_stop_distance_m,
         "target_turnaround_window": args.target_turnaround_window,
         "target_turnaround_rise_m": args.target_turnaround_rise_m,
         "stop_confirm_steps": args.stop_confirm_steps,
@@ -611,7 +663,9 @@ def main() -> None:
         "max_yaw_command": args.max_yaw_command, "max_forward_command": args.max_forward_command,
         "min_forward_command": args.min_forward_command,
         "search_yaw_command": args.search_yaw_command,
-        "search_threshold": args.search_threshold, "search_head": search_head, "target_head": target_head,
+        "search_threshold": args.search_threshold,
+        "wheel_damping": args.wheel_damping,
+        "search_head": search_head, "target_head": target_head,
         "target_head_mode": target_head_mode,
         "target_distance_scale_m": target_distance_scale_m,
         "min_predicted_target_distance_normalized": min_predicted_target_distance,
@@ -634,6 +688,16 @@ def main() -> None:
         "min_root_height": min_height, "max_root_height": max_height, "terminated_steps": terminated_steps,
         "target_reached": target_reached, "target_reached_step": target_reached_step,
         "max_post_stop_target_hold_steps": max_post_stop_target_hold_steps,
+        "mean_post_stop_planar_speed": (
+            None
+            if post_stop_speed_samples == 0
+            else post_stop_planar_speed_sum / post_stop_speed_samples
+        ),
+        "max_post_stop_planar_speed": (
+            None if post_stop_speed_samples == 0 else max_post_stop_planar_speed
+        ),
+        "final_post_stop_planar_speed": final_post_stop_planar_speed,
+        "final_post_stop_mean_abs_wheel_speed": final_post_stop_mean_abs_wheel_speed,
         "stop_triggered_step": stop_triggered_step, "min_target_distance": None if args.target_color == "none" else min_target_distance,
         "final_target_distance": final_distance, "skill_counts": dict(skill_counts),
         "mean_command": (command_sum / max(command_count, 1)).tolist(), "success": success, "video": str(video_path),
