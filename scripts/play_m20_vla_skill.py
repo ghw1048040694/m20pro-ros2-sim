@@ -74,7 +74,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import onnxruntime as ort  # noqa: E402
 import torch  # noqa: E402
-from m20_vla_skill_model import COMMAND_SCALE, SKILL_NAMES, M20VLASkillPolicy  # noqa: E402
+from m20_vla_skill_model import (  # noqa: E402
+    COMMAND_SCALE,
+    SKILL_NAMES,
+    TARGET_DISTANCE_SCALE_M,
+    M20VLASkillPolicy,
+)
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.actuators import DCMotorCfg  # noqa: E402
@@ -230,8 +235,15 @@ def main() -> None:
     config = payload.get("config", {})
     search_head = bool(config.get("search_head", False))
     target_head = bool(config.get("target_head", False))
+    target_head_mode = str(config.get("target_head_mode", "shared_v1"))
+    target_distance_scale_m = float(config.get("target_distance_scale_m", TARGET_DISTANCE_SCALE_M))
+    if target_distance_scale_m <= 0.0:
+        raise RuntimeError(f"Invalid target distance scale: {target_distance_scale_m}")
     model = M20VLASkillPolicy(
-        config.get("architecture", "spatial_v2"), search_head=search_head, target_head=target_head
+        config.get("architecture", "spatial_v2"),
+        search_head=search_head,
+        target_head=target_head,
+        target_head_mode=target_head_mode,
     )
     model.load_state_dict(payload["model_state_dict"], strict=False)
     model_device = torch.device(args.model_device if torch.cuda.is_available() or not args.model_device.startswith("cuda") else "cpu")
@@ -269,6 +281,11 @@ def main() -> None:
     start_yaw = float(np.arctan2(2.0 * (start_quat[0] * start_quat[3] + start_quat[1] * start_quat[2]), 1.0 - 2.0 * (start_quat[2] ** 2 + start_quat[3] ** 2)))
     min_height = max_height = float(robot.data.root_pos_w[0, 2].item())
     min_target_distance = float("inf")
+    target_xy_eval = (
+        torch.tensor([args.target_x, args.target_y], device=robot.device)
+        if args.target_color != "none"
+        else None
+    )
     target_reached = args.target_color == "none"
     target_reached_step = None
     stop_triggered_step = None
@@ -278,6 +295,13 @@ def main() -> None:
     command_sum = np.zeros(3, dtype=np.float64)
     command_count = 0
     skill_counts: Counter[str] = Counter()
+    prediction_trace: list[dict[str, object]] = []
+    min_predicted_target_distance = None
+    min_predicted_target_distance_step = None
+    max_target_stop_probability = None
+    max_target_stop_probability_step = None
+    target_distance_abs_error_sum = 0.0
+    target_distance_error_count = 0
     video_path = args.video_dir / "m20-vla-skill-step-0.mp4"
     video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
     if not video.isOpened():
@@ -327,7 +351,9 @@ def main() -> None:
                         target_distance_prediction = 1.0
                 command_np = (command_norm[0].detach().cpu().numpy() * COMMAND_SCALE.numpy()).astype(np.float32)
                 skill_index = int(skill_logits[0].argmax().item())
-                predicted_skill = SKILL_NAMES[skill_index]
+                raw_skill = SKILL_NAMES[skill_index]
+                predicted_skill = raw_skill
+                target_stop_candidate = False
                 if target_head:
                     # The target head is trained from frame-level reached labels;
                     # do not allow the imbalanced generic stop class to stop early.
@@ -383,10 +409,13 @@ def main() -> None:
                     cached_command = (0.0, 0.0, 0.0) if stop_latched else last_nonstop_command
                 else:
                     turn_streak = 0
+                generic_stop_probability = float(
+                    torch.softmax(skill_logits, dim=-1)[0, SKILL_NAMES.index("stop")].item()
+                )
                 stop_probability = (
                     target_stop_probability
                     if target_head and target_distance_prediction <= args.target_distance_threshold
-                    else float(torch.softmax(skill_logits, dim=-1)[0, SKILL_NAMES.index("stop")].item())
+                    else generic_stop_probability
                 )
                 if stop_probability >= args.stop_threshold and cached_skill == "stop":
                     stop_confidence_streak += 1
@@ -401,6 +430,55 @@ def main() -> None:
                         stop_triggered_step = step
                 if cached_skill not in {"stop", "search", "jump"} and cached_skill != "forward_recovery":
                     last_nonstop_command = cached_command
+                actual_target_distance = (
+                    float(torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy_eval).item())
+                    if target_xy_eval is not None
+                    else None
+                )
+                predicted_target_distance_m = (
+                    target_distance_prediction * target_distance_scale_m if target_head else None
+                )
+                target_distance_error_m = (
+                    abs(predicted_target_distance_m - actual_target_distance)
+                    if predicted_target_distance_m is not None and actual_target_distance is not None
+                    else None
+                )
+                if target_head:
+                    if (
+                        min_predicted_target_distance is None
+                        or target_distance_prediction < min_predicted_target_distance
+                    ):
+                        min_predicted_target_distance = target_distance_prediction
+                        min_predicted_target_distance_step = step
+                    if (
+                        max_target_stop_probability is None
+                        or target_stop_probability > max_target_stop_probability
+                    ):
+                        max_target_stop_probability = target_stop_probability
+                        max_target_stop_probability_step = step
+                if target_distance_error_m is not None:
+                    target_distance_abs_error_sum += target_distance_error_m
+                    target_distance_error_count += 1
+                prediction_trace.append(
+                    {
+                        "step": step,
+                        "actual_target_distance_m": actual_target_distance,
+                        "predicted_target_distance_normalized": (
+                            target_distance_prediction if target_head else None
+                        ),
+                        "predicted_target_distance_m": predicted_target_distance_m,
+                        "target_distance_absolute_error_m": target_distance_error_m,
+                        "target_stop_probability": target_stop_probability if target_head else None,
+                        "generic_stop_probability": generic_stop_probability,
+                        "stop_gate_probability": stop_probability,
+                        "search_probability": search_probability,
+                        "raw_skill": raw_skill,
+                        "selected_skill": cached_skill,
+                        "target_stop_candidate": target_stop_candidate,
+                        "stop_latched": stop_latched,
+                        "command": list(cached_command),
+                    }
+                )
                 if args.debug_steps and step < args.debug_steps:
                     print(f"[M20PRO-SKILL-DEBUG] step={step} skill={cached_skill} search_p={search_probability:.3f} target_stop_p={target_stop_probability:.3f} target_dist_p={target_distance_prediction:.3f} stop_p={stop_probability:.3f} command={cached_command}", flush=True)
             command = (0.0, 0.0, 0.0) if stop_latched else cached_command
@@ -432,8 +510,9 @@ def main() -> None:
             gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
             terminated_steps += int(height < 0.45 or gravity_z > -0.5)
             if args.target_color != "none":
-                target_xy = torch.tensor([args.target_x, args.target_y], device=robot.device)
-                distance = float(torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy).item())
+                distance = float(
+                    torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy_eval).item()
+                )
                 min_target_distance = min(min_target_distance, distance)
                 if not target_reached and distance <= 0.8:
                     target_reached = True
@@ -446,11 +525,13 @@ def main() -> None:
     yaw_delta = float(np.arctan2(np.sin(current_yaw - start_yaw), np.cos(current_yaw - start_yaw)))
     final_distance = None
     if args.target_color != "none":
-        final_distance = float(torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)).item())
+        final_distance = float(
+            torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy_eval).item()
+        )
     stable = terminated_steps == 0 and min_height >= 0.45
     success = stable and (args.target_color == "none" or (target_reached and stop_triggered_step is not None))
     metrics = {
-        "format": "m20_vla_two_layer_replay_v1", "checkpoint": str(args.checkpoint), "low_level_policy": str(args.policy),
+        "format": "m20_vla_two_layer_replay_v2", "checkpoint": str(args.checkpoint), "low_level_policy": str(args.policy),
         "task_text": args.task_text, "target_color": args.target_color,
         "target_xy": [args.target_x, args.target_y] if args.target_color != "none" else None,
         "target_coordinates_used_by_policy": False, "steps": args.steps, "command_hold_steps": args.command_hold_steps,
@@ -463,6 +544,24 @@ def main() -> None:
         "min_forward_command": args.min_forward_command,
         "search_yaw_command": args.search_yaw_command,
         "search_threshold": args.search_threshold, "search_head": search_head, "target_head": target_head,
+        "target_head_mode": target_head_mode,
+        "target_distance_scale_m": target_distance_scale_m,
+        "min_predicted_target_distance_normalized": min_predicted_target_distance,
+        "min_predicted_target_distance_m": (
+            None
+            if min_predicted_target_distance is None
+            else min_predicted_target_distance * target_distance_scale_m
+        ),
+        "min_predicted_target_distance_step": min_predicted_target_distance_step,
+        "max_target_stop_probability": max_target_stop_probability,
+        "max_target_stop_probability_step": max_target_stop_probability_step,
+        "mean_absolute_target_distance_error_m": (
+            None
+            if target_distance_error_count == 0
+            else target_distance_abs_error_sum / target_distance_error_count
+        ),
+        "prediction_trace_sample_count": len(prediction_trace),
+        "prediction_trace": prediction_trace,
         "displacement_xy": displacement.tolist(), "yaw_delta": yaw_delta,
         "min_root_height": min_height, "max_root_height": max_height, "terminated_steps": terminated_steps,
         "target_reached": target_reached, "target_reached_step": target_reached_step,
@@ -475,6 +574,13 @@ def main() -> None:
     print(f"[M20PRO-SKILL-PLAY] displacement_xy={displacement.tolist()} yaw_delta={yaw_delta:.4f} rad", flush=True)
     print(f"[M20PRO-SKILL-PLAY] min_root_height={min_height:.4f} m terminated_steps={terminated_steps}", flush=True)
     print(f"[M20PRO-SKILL-PLAY] target_reached={target_reached} stop_step={stop_triggered_step} min_distance={min_target_distance:.4f} m success={success}", flush=True)
+    if target_head:
+        print(
+            f"[M20PRO-SKILL-PLAY] min_predicted_distance={min_predicted_target_distance * target_distance_scale_m:.4f} m "
+            f"at_step={min_predicted_target_distance_step} max_target_stop_p={max_target_stop_probability:.4f} "
+            f"at_step={max_target_stop_probability_step}",
+            flush=True,
+        )
     print(f"[M20PRO-SKILL-PLAY] skill_counts={dict(skill_counts)}", flush=True)
     print(f"[M20PRO-SKILL-PLAY] video={video_path}", flush=True)
     print(f"[M20PRO-SKILL-PLAY] metrics={metrics_path}", flush=True)

@@ -20,7 +20,12 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from m20_vla_skill_model import COMMAND_SCALE, SKILL_NAMES, M20VLASkillPolicy
+from m20_vla_skill_model import (
+    COMMAND_SCALE,
+    SKILL_NAMES,
+    TARGET_DISTANCE_SCALE_M,
+    M20VLASkillPolicy,
+)
 
 
 DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
@@ -45,10 +50,19 @@ parser.add_argument("--freeze-backbone", action="store_true", help="Train only s
 parser.add_argument("--search-head", action="store_true", help="Add an isolated language search-intent head.")
 parser.add_argument("--search-loss-weight", type=float, default=1.0)
 parser.add_argument("--target-head", action="store_true", help="Add a learned target-reached stop head.")
+parser.add_argument(
+    "--target-head-mode",
+    choices=["shared_v1", "visual_v2"],
+    default="shared_v1",
+    help="Use the shared navigation feature or an isolated trainable visual target encoder.",
+)
 parser.add_argument("--target-loss-weight", type=float, default=1.0)
+parser.add_argument("--target-stop-pos-weight", type=float, default=1.0)
 args = parser.parse_args()
 if args.freeze_backbone and args.init_checkpoint is None:
     parser.error("--freeze-backbone requires --init-checkpoint")
+if args.target_stop_pos_weight <= 0.0:
+    parser.error("--target-stop-pos-weight must be positive")
 
 
 @dataclass
@@ -85,6 +99,7 @@ def default_dataset_dirs() -> list[Path]:
     names.extend(sorted(path.name for path in (DATA_ROOT / "datasets").glob("m20_vla_sync_*")))
     names.extend(sorted(path.name for path in (DATA_ROOT / "datasets").glob("m20_skill_expert_*")))
     names.extend(sorted(path.name for path in (DATA_ROOT / "datasets").glob("m20_search_expert_*")))
+    names.extend(sorted(path.name for path in (DATA_ROOT / "datasets").glob("m20_dagger_*")))
     return [DATA_ROOT / "datasets" / name for name in names]
 
 
@@ -105,7 +120,18 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                     and int(h5.attrs.get("terminated_steps", 1)) == 0
                     and float(h5.attrs.get("min_root_height", 0.0)) >= 0.45
                 )
-                if not bool(h5.attrs.get("success", False)) and not stable_search:
+                stable_target_dagger = (
+                    args.target_head
+                    and bool(h5.attrs.get("dagger", False))
+                    and bool(h5.attrs.get("target_reached", False))
+                    and int(h5.attrs.get("terminated_steps", 1)) == 0
+                    and float(h5.attrs.get("min_root_height", 0.0)) >= 0.45
+                )
+                if (
+                    not bool(h5.attrs.get("success", False))
+                    and not stable_search
+                    and not stable_target_dagger
+                ):
                     print(f"[M20PRO-SKILL] skip unsuccessful episode={path}")
                     continue
                 obs = h5["observation"]
@@ -124,9 +150,6 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                 else:
                     command = np.repeat(np.asarray(h5.attrs.get("command", (0.0, 0.0, 0.0)), dtype=np.float32)[None], len(front), axis=0)
                 target_step = int(h5.attrs.get("target_reached_step", -1))
-                target_stop = np.zeros(len(command), dtype=np.float32)
-                if target_step >= 0:
-                    target_stop[min(target_step + 1, len(target_stop)) :] = 1.0
                 target_xy = np.asarray(h5.attrs.get("target_xy", (0.0, 0.0)), dtype=np.float32)
                 has_target = str(h5.attrs.get("target_color", "none")) != "none" and state is not None
                 target_distance = (
@@ -135,6 +158,11 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                     else np.zeros(len(command), dtype=np.float32)
                 )
                 target_mask = np.full(len(command), 1.0 if has_target else 0.0, dtype=np.float32)
+                target_stop = (
+                    (target_distance <= 0.8).astype(np.float32)
+                    if has_target
+                    else np.zeros(len(command), dtype=np.float32)
+                )
                 if target_step >= 0 and bool(h5.attrs.get("stop_on_target", False)):
                     end = min(len(command), target_step + 1 + args.post_reach_steps)
                     front, rear, lidar, proprio, command, target_stop, target_distance, target_mask = (
@@ -197,7 +225,8 @@ class FrameDataset(Dataset):
             ),
             "target_stop": torch.tensor(episode.target_stop[step], dtype=torch.float32),
             "target_distance": torch.tensor(
-                np.clip(episode.target_distance[step] / 5.0, 0.0, 1.0), dtype=torch.float32
+                np.clip(episode.target_distance[step] / TARGET_DISTANCE_SCALE_M, 0.0, 1.0),
+                dtype=torch.float32,
             ),
             "target_mask": torch.tensor(episode.target_mask[step], dtype=torch.float32),
         }
@@ -233,7 +262,12 @@ def run_epoch(
                 target_bce = nn.functional.binary_cross_entropy_with_logits(
                     target_logit,
                     batch["target_stop"],
-                    pos_weight=torch.tensor(4.0, device=device),
+                    pos_weight=torch.tensor(args.target_stop_pos_weight, device=device),
+                    reduction="none",
+                )
+                target_bce = (
+                    (target_bce * batch["target_mask"]).sum()
+                    / batch["target_mask"].sum().clamp_min(1.0)
                 )
                 distance_error = nn.functional.smooth_l1_loss(
                     target_distance_pred, batch["target_distance"], reduction="none"
@@ -296,14 +330,41 @@ def main() -> None:
     counts = torch.bincount(train_skills, minlength=len(SKILL_NAMES)).float()
     skill_weight = (counts.sum() / counts.clamp_min(1.0)).sqrt()
     skill_weight = (skill_weight / skill_weight.mean()).to(args.device if torch.cuda.is_available() else "cpu")
-    sample_weights = (1.0 / counts.clamp_min(1.0))[train_skills].double()
+    if args.target_head and args.freeze_backbone:
+        target_masks = torch.tensor(
+            [
+                train_set.episodes[ep_id].target_mask[step]
+                for ep_id, step in train_set.frames
+            ],
+            dtype=torch.float32,
+        )
+        target_stops = torch.tensor(
+            [
+                int(train_set.episodes[ep_id].target_stop[step])
+                for ep_id, step in train_set.frames
+            ],
+            dtype=torch.long,
+        )
+        target_counts = torch.bincount(target_stops[target_masks.bool()], minlength=2).float()
+        if (target_counts == 0).any():
+            raise RuntimeError(f"Target stop labels require both classes, got {target_counts.tolist()}")
+        sample_weights = torch.zeros(len(train_set), dtype=torch.double)
+        sample_weights[target_masks.bool()] = (
+            1.0 / target_counts[target_stops[target_masks.bool()]]
+        ).double()
+    else:
+        target_counts = None
+        sample_weights = (1.0 / counts.clamp_min(1.0))[train_skills].double()
     sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_set), replacement=True, generator=torch.Generator().manual_seed(args.seed))
     train_loader = DataLoader(train_set, batch_size=args.batch_size, sampler=sampler, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True) if val_set else None
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
     skill_weight = skill_weight.to(device)
     model = M20VLASkillPolicy(
-        args.architecture, search_head=args.search_head, target_head=args.target_head
+        args.architecture,
+        search_head=args.search_head,
+        target_head=args.target_head,
+        target_head_mode=args.target_head_mode,
     ).to(device)
     if args.init_checkpoint is not None:
         payload = torch.load(args.init_checkpoint, map_location=device, weights_only=True)
@@ -312,7 +373,7 @@ def main() -> None:
         for name, parameter in model.named_parameters():
             parameter.requires_grad = (
                 (args.search_head and name.startswith("search_head."))
-                or (args.target_head and name.startswith("target_head."))
+                or (args.target_head and name.startswith("target_"))
                 if (args.search_head or args.target_head)
                 else (name.startswith("language.") or name.startswith("skill_head."))
             )
@@ -341,7 +402,10 @@ def main() -> None:
         "search_head": args.search_head,
         "search_loss_weight": args.search_loss_weight,
         "target_head": args.target_head,
+        "target_head_mode": args.target_head_mode,
         "target_loss_weight": args.target_loss_weight,
+        "target_stop_pos_weight": args.target_stop_pos_weight,
+        "target_distance_scale_m": TARGET_DISTANCE_SCALE_M,
         "seed": args.seed,
     }
     (args.output_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
@@ -373,8 +437,19 @@ def main() -> None:
     (args.output_dir / "history.json").write_text(json.dumps(history, indent=2) + "\n")
     coverage = {name: int((train_skills == index).sum()) for index, name in enumerate(SKILL_NAMES)}
     (args.output_dir / "label_coverage.json").write_text(json.dumps(coverage, ensure_ascii=False, indent=2) + "\n")
+    target_coverage = (
+        None
+        if target_counts is None
+        else {"not_reached": int(target_counts[0]), "reached": int(target_counts[1])}
+    )
+    if target_coverage is not None:
+        (args.output_dir / "target_label_coverage.json").write_text(
+            json.dumps(target_coverage, ensure_ascii=False, indent=2) + "\n"
+        )
     print(f"[M20PRO-SKILL] episodes={len(episodes)} train_frames={len(train_set)} val_frames={len(val_set) if val_set else 0}")
     print(f"[M20PRO-SKILL] label_coverage={coverage}")
+    if target_coverage is not None:
+        print(f"[M20PRO-SKILL] target_label_coverage={target_coverage}")
     print(f"[M20PRO-SKILL] checkpoint={args.output_dir / 'best.pt'}")
 
 
