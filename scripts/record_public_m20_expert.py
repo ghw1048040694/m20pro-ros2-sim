@@ -128,6 +128,8 @@ if args.dagger_skill_checkpoint is not None and not args.dagger_skill_checkpoint
     parser.error(f"Skill DAgger checkpoint not found: {args.dagger_skill_checkpoint}")
 if args.dagger_checkpoint is not None and args.dagger_skill_checkpoint is not None:
     parser.error("Use either --dagger-checkpoint or --dagger-skill-checkpoint, not both")
+if args.dagger_skill_checkpoint is not None and not args.navigate_to_target:
+    parser.error("--dagger-skill-checkpoint requires --navigate-to-target for expert command labels")
 if not 0.0 <= args.dagger_alpha <= 1.0:
     parser.error("--dagger-alpha must be in [0, 1]")
 if not 0.0 <= args.dagger_skill_expert_probability <= 1.0:
@@ -439,6 +441,35 @@ def canonical_skill_command(
     return (forward, 0.0, 0.0), "forward"
 
 
+def public_expert_action(
+    session: ort.InferenceSession,
+    robot: Articulation,
+    joint_ids: list[int],
+    previous_action: torch.Tensor,
+    command: tuple[float, float, float],
+    target_reached: bool,
+) -> torch.Tensor:
+    policy_command = (0.0, 0.0, 0.0) if target_reached else command
+    mirror = args.mirror_negative_yaw and policy_command[2] < -1e-6
+    if mirror:
+        policy_command = (policy_command[0], policy_command[1], abs(policy_command[2]))
+    observation = native_observation(
+        robot,
+        joint_ids,
+        previous_action,
+        policy_command,
+        mirror=mirror,
+    )
+    action_np = session.run(["actions"], {"obs": observation.cpu().numpy()})[0]
+    action = torch.from_numpy(action_np).to(robot.device)
+    if mirror:
+        action = mirror_action(action)
+    if args.navigate_to_target and args.override_navigation_wheels:
+        override_command = target_stop_command(robot) if target_reached else command
+        action = override_navigation_wheels(action, override_command, previous_action)
+    return action
+
+
 def reset_scene(scene: InteractiveScene, initial_yaw_rad: float) -> None:
     robot = scene["robot"]
     robot.reset()
@@ -463,6 +494,12 @@ def main() -> None:
     if session.get_inputs()[0].shape != [1, 57] or session.get_outputs()[0].shape != [1, 16]:
         raise RuntimeError("Native M20 policy is not the expected 57->16 model")
     dagger_model = None
+    dagger_skill_model = None
+    dagger_device = torch.device(
+        args.dagger_model_device
+        if torch.cuda.is_available() or not args.dagger_model_device.startswith("cuda")
+        else "cpu"
+    )
     rng = np.random.default_rng(args.seed)
     if args.episode_offset:
         rng.uniform(
@@ -477,12 +514,18 @@ def main() -> None:
             int(payload["horizon"]), architecture=config.get("architecture", "global_v1")
         )
         dagger_model.load_state_dict(payload["model_state_dict"])
-        dagger_device = torch.device(
-            args.dagger_model_device
-            if torch.cuda.is_available() or not args.dagger_model_device.startswith("cuda")
-            else "cpu"
-        )
         dagger_model.to(dagger_device).eval()
+    if args.dagger_skill_checkpoint is not None:
+        payload = torch.load(args.dagger_skill_checkpoint, map_location="cpu", weights_only=True)
+        config = payload.get("config", {})
+        dagger_skill_model = M20VLASkillPolicy(
+            config.get("architecture", "spatial_v2"),
+            search_head=bool(config.get("search_head", False)),
+            target_head=bool(config.get("target_head", False)),
+            target_head_mode=config.get("target_head_mode", "shared_v1"),
+        )
+        dagger_skill_model.load_state_dict(payload["model_state_dict"])
+        dagger_skill_model.to(dagger_device).eval()
     sim = SimulationContext(SimulationCfg(dt=0.005, render_interval=4, device=args.device or "cuda:0"))
     scene = InteractiveScene(NativeM20SceneCfg(num_envs=1, env_spacing=3.0, replicate_physics=True))
     sim.reset()
@@ -509,9 +552,14 @@ def main() -> None:
             "seed": args.seed,
         },
         "asset_usd_path": os.environ.get("M20PRO_USD_PATH", str(M20PRO_CFG.spawn.usd_path)),
-        "dagger": args.dagger_checkpoint is not None,
+        "dagger": args.dagger_checkpoint is not None or args.dagger_skill_checkpoint is not None,
         "dagger_checkpoint": None if args.dagger_checkpoint is None else str(args.dagger_checkpoint),
         "dagger_alpha": args.dagger_alpha,
+        "dagger_skill": args.dagger_skill_checkpoint is not None,
+        "dagger_skill_checkpoint": (
+            None if args.dagger_skill_checkpoint is None else str(args.dagger_skill_checkpoint)
+        ),
+        "dagger_skill_expert_probability": args.dagger_skill_expert_probability,
         "navigation": {
             "forward_speed": args.nav_forward_speed, "heading_gain": args.nav_heading_gain,
             "max_yaw": args.nav_max_yaw, "turn_threshold": args.nav_turn_threshold,
@@ -529,6 +577,10 @@ def main() -> None:
         "control_hz": 50.0, "joint_names": POLICY_JOINT_NAMES,
         "observation": {"front_rgb": [args.image_height, args.image_width, 3], "rear_rgb": [args.image_height, args.image_width, 3],
                          "lidar": [ray_count], "proprio": [57], "state": [45], "expert_command": [3]},
+        "dagger_observation": {
+            "learner_command": [3],
+            "expert_intervention": [],
+        } if args.dagger_skill_checkpoint is not None else None,
         "action": {"shape": [16], "leg": "default_pose + output[:12] * [0.125,0.25,0.25]", "wheel": "output[12:] * 5.0"},
         "success_rule": "stable plus command-direction check; target episodes also require reaching target_xy",
     }
@@ -540,6 +592,7 @@ def main() -> None:
 
     for episode in range(args.episodes):
         episode_id = args.episode_offset + episode
+        intervention_rng = np.random.default_rng(args.seed + 1_000_003 * (episode_id + 1))
         episode_initial_yaw_deg = args.initial_yaw_deg + float(
             rng.uniform(-args.initial_yaw_jitter_deg, args.initial_yaw_jitter_deg)
         )
@@ -580,6 +633,10 @@ def main() -> None:
             )
         )
         target_turn_sign = 1.0 if initial_heading_error >= 0.0 else -1.0
+        expert_intervention_steps = 0
+        stochastic_intervention_steps = 0
+        forced_stop_intervention_steps = 0
+        learner_skill_counts = {name: 0 for name in SKILL_NAMES}
         with h5py.File(path, "w") as h5:
             obs = h5.create_group("observation")
             front_ds = obs.create_dataset("front_rgb", (args.steps, args.image_height, args.image_width, 3), dtype="u1", compression="lzf")
@@ -589,6 +646,16 @@ def main() -> None:
             state_ds = obs.create_dataset("state", (args.steps, 45), dtype="f4", compression="lzf")
             action_ds = h5.create_dataset("action", (args.steps, 16), dtype="f4", compression="lzf")
             command_ds = h5.create_dataset("expert_command", (args.steps, 3), dtype="f4", compression="lzf")
+            learner_command_ds = (
+                h5.create_dataset("learner_command", (args.steps, 3), dtype="f4", compression="lzf")
+                if dagger_skill_model is not None
+                else None
+            )
+            expert_intervention_ds = (
+                h5.create_dataset("expert_intervention", (args.steps,), dtype="u1")
+                if dagger_skill_model is not None
+                else None
+            )
             done_ds = h5.create_dataset("terminated", (args.steps,), dtype="u1")
             h5.attrs["task_text"] = args.task_text
             h5.attrs["command"] = np.asarray([args.command_x, args.command_y, args.command_yaw], dtype=np.float32)
@@ -604,6 +671,9 @@ def main() -> None:
             h5.attrs["asset_usd_path"] = metadata["asset_usd_path"]
             h5.attrs["dagger"] = metadata["dagger"]
             h5.attrs["dagger_alpha"] = args.dagger_alpha
+            h5.attrs["dagger_skill"] = metadata["dagger_skill"]
+            h5.attrs["dagger_skill_checkpoint"] = metadata["dagger_skill_checkpoint"] or ""
+            h5.attrs["dagger_skill_expert_probability"] = args.dagger_skill_expert_probability
             for step in range(args.steps):
                 target_in_range = False
                 if TARGET_RGB is not None:
@@ -622,15 +692,13 @@ def main() -> None:
                     elif cached_navigation_command is None or step >= navigation_command_until or target_reached:
                         cached_navigation_command = navigation_command(robot, target_reached)
                         navigation_command_until = step + args.nav_command_hold_steps
-                    command = cached_navigation_command
+                    expert_command = cached_navigation_command
                 else:
-                    command = (0.0, 0.0, 0.0) if args.stop_on_target and target_reached else command_for_step(step)
-                set_navigation_wheel_damping(robot, command, target_reached)
-                policy_command = (0.0, 0.0, 0.0) if target_reached else command
-                mirror = args.mirror_negative_yaw and policy_command[2] < -1e-6
-                if mirror:
-                    policy_command = (policy_command[0], policy_command[1], abs(policy_command[2]))
-                observation = native_observation(robot, joint_ids, last_action, policy_command, mirror=mirror)
+                    expert_command = (
+                        (0.0, 0.0, 0.0)
+                        if args.stop_on_target and target_reached
+                        else command_for_step(step)
+                    )
                 # Keep every modality on the same pre-action timestamp as the
                 # proprioception and expert action. The post-step frame is
                 # reserved for the inspectable video only.
@@ -640,12 +708,25 @@ def main() -> None:
                 # VLA always receives the robot's physical (unmirrored)
                 # proprio frame. Mirroring is an implementation detail of
                 # the public ONNX expert for negative-yaw commands only.
-                vla_observation = native_observation(robot, joint_ids, last_action, command, mirror=False)
+                policy_last_action = (
+                    dagger_last_action
+                    if dagger_model is not None or dagger_skill_model is not None
+                    else last_action
+                )
+                vla_observation = native_observation(
+                    robot,
+                    joint_ids,
+                    policy_last_action,
+                    expert_command,
+                    mirror=False,
+                )
                 vla_action = None
+                learner_command = expert_command
+                learner_skill = "stop" if target_reached else "forward"
+                expert_intervention = False
                 if dagger_model is not None:
-                    dagger_device = next(dagger_model.parameters()).device
                     vla_observation = native_observation(
-                        robot, joint_ids, dagger_last_action, command, mirror=False
+                        robot, joint_ids, dagger_last_action, expert_command, mirror=False
                     )
                     vla_observation = vla_observation.clone()
                     vla_observation[:, 6:9] = 0.0
@@ -666,6 +747,62 @@ def main() -> None:
                             vla_observation.to(dagger_device),
                             language_input,
                         )[:, 0].to(robot.device)
+                elif dagger_skill_model is not None:
+                    vla_observation = vla_observation.clone()
+                    vla_observation[:, 6:9] = 0.0
+                    vla_observation[:, 41:57] = 0.0
+                    rgb_input = np.concatenate(
+                        (
+                            cv2.resize(front_observation, (80, 48), interpolation=cv2.INTER_AREA),
+                            cv2.resize(rear_observation, (80, 48), interpolation=cv2.INTER_AREA),
+                        ),
+                        axis=-1,
+                    ).transpose(2, 0, 1)
+                    rgb_input = (
+                        torch.from_numpy(rgb_input.copy())
+                        .float()
+                        .div_(255.0)
+                        .unsqueeze(0)
+                        .to(dagger_device)
+                    )
+                    lidar_input = (
+                        torch.from_numpy(lidar_observation.copy())
+                        .float()
+                        .div_(20.0)
+                        .unsqueeze(0)
+                        .to(dagger_device)
+                    )
+                    language_input = encode_text(args.task_text).to(dagger_device).unsqueeze(0)
+                    with torch.inference_mode():
+                        command_norm, skill_logits = dagger_skill_model(
+                            rgb_input,
+                            lidar_input,
+                            vla_observation.to(dagger_device),
+                            language_input,
+                        )[:2]
+                    learner_command, learner_skill = canonical_skill_command(
+                        command_norm,
+                        skill_logits,
+                    )
+                    learner_skill_counts[learner_skill] += 1
+                    forced_stop_intervention = target_reached
+                    stochastic_intervention = (
+                        not forced_stop_intervention
+                        and bool(
+                            intervention_rng.random()
+                            < args.dagger_skill_expert_probability
+                        )
+                    )
+                    expert_intervention = forced_stop_intervention or stochastic_intervention
+                    expert_intervention_steps += int(expert_intervention)
+                    stochastic_intervention_steps += int(stochastic_intervention)
+                    forced_stop_intervention_steps += int(forced_stop_intervention)
+                execution_command = (
+                    expert_command
+                    if dagger_skill_model is None or expert_intervention
+                    else learner_command
+                )
+                set_navigation_wheel_damping(robot, execution_command, target_reached)
                 # Keep the native leg stabilizer active at the target. The
                 # wheel override applies a bounded reverse command based on
                 # measured body velocity, which dissipates inertia without
@@ -675,23 +812,30 @@ def main() -> None:
                     or (args.stop_on_target and target_reached)
                 )
                 if stop_now:
-                    action = torch.zeros((1, 16), device=robot.device)
+                    expert_action = torch.zeros((1, 16), device=robot.device)
                 else:
-                    action_np = session.run(["actions"], {"obs": observation.cpu().numpy()})[0]
-                    action = torch.from_numpy(action_np).to(robot.device)
-                    if mirror:
-                        action = mirror_action(action)
-                    if args.navigate_to_target and args.override_navigation_wheels:
-                        if target_reached and target_reached_step is not None:
-                            action = override_navigation_wheels(action, target_stop_command(robot), last_action)
-                        else:
-                            action = override_navigation_wheels(action, command, last_action)
-                expert_action = action
+                    expert_action = public_expert_action(
+                        session,
+                        robot,
+                        joint_ids,
+                        policy_last_action,
+                        expert_command,
+                        target_reached,
+                    )
                 execution_action = expert_action
                 if vla_action is not None:
                     execution_action = (
                         args.dagger_alpha * expert_action + (1.0 - args.dagger_alpha) * vla_action
                     ).clamp(-4.0, 4.0)
+                elif dagger_skill_model is not None and not expert_intervention and not stop_now:
+                    execution_action = public_expert_action(
+                        session,
+                        robot,
+                        joint_ids,
+                        policy_last_action,
+                        learner_command,
+                        target_reached,
+                    )
                 if stop_now:
                     # Do not let the learner reintroduce motion after the
                     # oracle has declared the visual target reached.
@@ -720,7 +864,10 @@ def main() -> None:
                     state,
                     expert_action[0].cpu().numpy(),
                 )
-                command_ds[step] = np.asarray(command, dtype=np.float32)
+                command_ds[step] = np.asarray(expert_command, dtype=np.float32)
+                if learner_command_ds is not None and expert_intervention_ds is not None:
+                    learner_command_ds[step] = np.asarray(learner_command, dtype=np.float32)
+                    expert_intervention_ds[step] = int(expert_intervention)
                 current_xy = robot.data.root_pos_w[0, :2]
                 path_length += float(torch.linalg.vector_norm(current_xy - previous_xy).item())
                 previous_xy = current_xy.clone()
@@ -774,6 +921,13 @@ def main() -> None:
             h5.attrs["final_planar_speed"] = final_planar_speed
             h5.attrs["path_length"] = path_length
             h5.attrs["success"] = success
+            h5.attrs["dagger_skill_expert_interventions"] = expert_intervention_steps
+            h5.attrs["dagger_skill_stochastic_interventions"] = stochastic_intervention_steps
+            h5.attrs["dagger_skill_forced_stop_interventions"] = forced_stop_intervention_steps
+            h5.attrs["dagger_skill_learner_skill_counts"] = json.dumps(
+                learner_skill_counts,
+                sort_keys=True,
+            )
         finalize_h264_video(video, video_path)
         displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
         stable = terminated_steps == 0 and min_height >= 0.45
@@ -802,6 +956,9 @@ def main() -> None:
             f"min_root_height={min_height:.4f} m terminated_steps={terminated_steps} command_ok={command_ok} "
             f"target_reached={target_reached} final_target_distance={final_target_distance} "
             f"reached_step={target_reached_step} path_length={path_length:.4f} m success={success} "
+            f"expert_interventions={expert_intervention_steps} "
+            f"stochastic_interventions={stochastic_intervention_steps} "
+            f"forced_stop_interventions={forced_stop_intervention_steps} "
             f"data={path} video={video_path}",
             flush=True,
         )

@@ -122,6 +122,12 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
         for path in sorted(directory.glob("episode_*.h5")):
             with h5py.File(path, "r") as h5:
                 task_text = str(h5.attrs.get("task_text", ""))
+                dagger_skill = bool(h5.attrs.get("dagger_skill", False))
+                if dagger_skill:
+                    required = {"expert_command", "learner_command", "expert_intervention"}
+                    missing = sorted(required.difference(h5.keys()))
+                    if missing:
+                        raise ValueError(f"Skill DAgger episode is missing {missing}: {path}")
                 stable_search = (
                     any(token in task_text for token in ("寻找", "搜索", "扫描"))
                     and int(h5.attrs.get("terminated_steps", 1)) == 0
@@ -134,10 +140,16 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                     and int(h5.attrs.get("terminated_steps", 1)) == 0
                     and float(h5.attrs.get("min_root_height", 0.0)) >= 0.45
                 )
+                stable_skill_dagger = (
+                    dagger_skill
+                    and int(h5.attrs.get("terminated_steps", 1)) == 0
+                    and float(h5.attrs.get("min_root_height", 0.0)) >= 0.45
+                )
                 if (
                     not bool(h5.attrs.get("success", False))
                     and not stable_search
                     and not stable_target_dagger
+                    and not stable_skill_dagger
                 ):
                     print(f"[M20PRO-SKILL] skip unsuccessful episode={path}")
                     continue
