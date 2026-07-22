@@ -64,9 +64,9 @@ parser.add_argument(
     default=0.03,
     help="Learned-distance rise from the recent minimum required by turnaround mode.",
 )
-parser.add_argument("--stop-confirm-steps", type=int, default=12, help="Consecutive high-confidence frames required before latching stop.")
+parser.add_argument("--stop-confirm-steps", type=int, default=14, help="Consecutive high-confidence frames required before latching stop.")
 parser.add_argument("--stop-vote-window", type=int, default=15)
-parser.add_argument("--stop-vote-fraction", type=float, default=0.80)
+parser.add_argument("--stop-vote-fraction", type=float, default=0.90)
 parser.add_argument("--max-turn-steps", type=int, default=8, help="Maximum consecutive VLA turn frames before forward recovery.")
 parser.add_argument("--turn-recovery-steps", type=int, default=20, help="Forward frames used after the turn watchdog trips.")
 parser.add_argument("--max-yaw-command", type=float, default=0.25)
