@@ -1,0 +1,429 @@
+"""Replay the two-layer M20 VLA: skill selector plus native M20 expert.
+
+The high-level policy consumes RGB, LiDAR, proprioception and language, then
+emits a bounded navigation command.  The released M20 57->16 ONNX policy is
+the low-level controller.  Target coordinates are used only for evaluation;
+they are never passed to either policy.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections import Counter, deque
+from pathlib import Path
+
+import cv2
+import numpy as np
+from isaaclab.app import AppLauncher
+
+
+DATA_ROOT = Path("/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA")
+DEFAULT_CHECKPOINT = DATA_ROOT / "checkpoints/m20_vla_skill_v1/best.pt"
+DEFAULT_POLICY = DATA_ROOT / "public_experts/m20_native/policy.onnx"
+DEFAULT_VIDEO_DIR = DATA_ROOT / "videos/m20_vla_skill_v1"
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
+parser.add_argument("--task-text", default="到红色方块去")
+parser.add_argument("--target-color", choices=["none", "red", "blue", "green"], default="red")
+parser.add_argument("--target-x", type=float, default=2.5)
+parser.add_argument("--target-y", type=float, default=0.0)
+parser.add_argument("--steps", type=int, default=300)
+parser.add_argument("--warmup-steps", type=int, default=75)
+parser.add_argument("--command-hold-steps", type=int, default=1)
+parser.add_argument("--stop-threshold", type=float, default=0.65)
+parser.add_argument("--stop-confirm-steps", type=int, default=8, help="Consecutive high-confidence frames required before latching stop.")
+parser.add_argument("--stop-vote-window", type=int, default=15)
+parser.add_argument("--stop-vote-fraction", type=float, default=0.60)
+parser.add_argument("--max-turn-steps", type=int, default=8, help="Maximum consecutive VLA turn frames before forward recovery.")
+parser.add_argument("--turn-recovery-steps", type=int, default=20, help="Forward frames used after the turn watchdog trips.")
+parser.add_argument("--max-yaw-command", type=float, default=0.25)
+parser.add_argument("--max-forward-command", type=float, default=0.35)
+parser.add_argument("--model-device", default="cpu")
+parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIR)
+parser.add_argument("--metrics", type=Path, default=None)
+parser.add_argument("--initial-height", type=float, default=0.54)
+parser.add_argument("--mirror-negative-yaw", action="store_true")
+parser.add_argument("--debug-steps", type=int, default=0)
+parser.add_argument("--video", action="store_true", help="Required: record an inspectable MP4.")
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args()
+if not args.video:
+    parser.error("--video is required so every replay leaves an inspectable MP4")
+if args.steps <= 0 or args.warmup_steps < 0 or args.command_hold_steps <= 0 or args.stop_confirm_steps <= 0 or args.stop_vote_window <= 0 or not 0.0 < args.stop_vote_fraction <= 1.0 or args.max_turn_steps <= 0 or args.turn_recovery_steps <= 0:
+    parser.error("--steps must be positive and timing values must be non-negative")
+if not args.checkpoint.is_file():
+    parser.error(f"skill checkpoint not found: {args.checkpoint}")
+if not args.policy.is_file():
+    parser.error(f"M20 policy not found: {args.policy}")
+args.enable_cameras = True
+app = AppLauncher(args).app
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import onnxruntime as ort  # noqa: E402
+import torch  # noqa: E402
+from m20_vla_skill_model import COMMAND_SCALE, SKILL_NAMES, M20VLASkillPolicy  # noqa: E402
+
+import isaaclab.sim as sim_utils  # noqa: E402
+from isaaclab.actuators import DCMotorCfg  # noqa: E402
+from isaaclab.assets import Articulation, AssetBaseCfg  # noqa: E402
+from isaaclab.scene import InteractiveScene, InteractiveSceneCfg  # noqa: E402
+from isaaclab.sensors import CameraCfg, RayCasterCfg, patterns  # noqa: E402
+from isaaclab.sim import SimulationCfg, SimulationContext  # noqa: E402
+from isaaclab.terrains import TerrainImporterCfg  # noqa: E402
+from isaaclab.utils import configclass  # noqa: E402
+from isaaclab.utils.math import quat_apply_inverse  # noqa: E402
+
+from assets.m20pro import M20PRO_CFG  # noqa: E402
+
+
+POLICY_JOINT_NAMES = [
+    "fl_hipx_joint", "fl_hipy_joint", "fl_knee_joint",
+    "fr_hipx_joint", "fr_hipy_joint", "fr_knee_joint",
+    "hl_hipx_joint", "hl_hipy_joint", "hl_knee_joint",
+    "hr_hipx_joint", "hr_hipy_joint", "hr_knee_joint",
+    "fl_wheel_joint", "fr_wheel_joint", "hl_wheel_joint", "hr_wheel_joint",
+]
+DEFAULT_POSE = torch.tensor(
+    [0.0, -0.6, 1.0, 0.0, -0.6, 1.0, 0.0, 0.6, -1.0, 0.0, 0.6, -1.0, 0.0, 0.0, 0.0, 0.0],
+    dtype=torch.float32,
+)
+LEG_SCALE = torch.tensor([0.125, 0.25, 0.25] * 4, dtype=torch.float32)
+WHEEL_SCALE = 5.0
+MIRROR_PERM = torch.tensor([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8, 13, 12, 15, 14], dtype=torch.long)
+MIRROR_SIGN = torch.tensor([-1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+MIRROR_ANGULAR_VELOCITY = torch.tensor([-1.0, 1.0, -1.0])
+MIRROR_POLAR_VECTOR = torch.tensor([1.0, -1.0, 1.0])
+TARGET_COLORS = {"red": (0.9, 0.05, 0.03), "blue": (0.03, 0.15, 0.95), "green": (0.04, 0.8, 0.08)}
+SENSOR_LINK = "base_link/base_link" if "m20_mjcf" in str(os.environ.get("M20PRO_USD_PATH", "")) else "base_link"
+
+PUBLIC_M20_CFG = M20PRO_CFG.replace(
+    init_state=M20PRO_CFG.init_state.replace(
+        pos=(0.0, 0.0, args.initial_height),
+        joint_pos={name: float(value) for name, value in zip(POLICY_JOINT_NAMES, DEFAULT_POSE)},
+        joint_vel={".*": 0.0},
+    ),
+    actuators={
+        "hipx": DCMotorCfg(joint_names_expr=[".*_hipx_joint"], effort_limit=32.4, saturation_effort=32.4, velocity_limit=45.0, stiffness=80.0, damping=2.0),
+        "hipy_knee": DCMotorCfg(joint_names_expr=[".*_(hipy|knee)_joint"], effort_limit=76.4, saturation_effort=76.4, velocity_limit=22.4, stiffness=80.0, damping=2.0),
+        "wheels": DCMotorCfg(joint_names_expr=[".*_wheel_joint"], effort_limit=21.6, saturation_effort=21.6, velocity_limit=79.3, stiffness=0.0, damping=0.6),
+    },
+)
+
+
+@configclass
+class SkillSceneCfg(InteractiveSceneCfg):
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground", terrain_type="plane", terrain_generator=None, collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0, restitution=0.0),
+    )
+    robot = PUBLIC_M20_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    target = (
+        AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Target",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.42, 0.42, 0.84),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=TARGET_COLORS[args.target_color]),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(args.target_x, args.target_y, 0.42)),
+        )
+        if args.target_color != "none" else None
+    )
+    front_camera = CameraCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}/front_camera", update_period=0.02, height=96, width=160, data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.05, 100.0)),
+        offset=CameraCfg.OffsetCfg(pos=(0.38, 0.0, 0.12), convention="world"),
+    )
+    rear_camera = CameraCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}/rear_camera", update_period=0.02, height=96, width=160, data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.05, 100.0)),
+        offset=CameraCfg.OffsetCfg(pos=(-0.38, 0.0, 0.12), convention="world"),
+    )
+    lidar = RayCasterCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}", update_period=0.02, ray_alignment="base",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.16)),
+        pattern_cfg=patterns.LidarPatternCfg(channels=1, vertical_fov_range=(0.0, 0.0), horizontal_fov_range=(-180.0, 180.0), horizontal_res=5.0),
+        max_distance=20.0, mesh_prim_paths=["/World/ground"],
+    )
+    third_person = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/ThirdPerson", update_period=0.02, height=288, width=480, data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(focal_length=18.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.05, 100.0)),
+    )
+    light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.8, 0.8, 0.8)))
+
+
+def encode_text(text: str, max_length: int = 32) -> torch.Tensor:
+    values = np.frombuffer(text.encode("utf-8")[:max_length], dtype=np.uint8).astype(np.int64) + 1
+    tokens = np.zeros(max_length, dtype=np.int64)
+    tokens[:len(values)] = values
+    return torch.from_numpy(tokens)
+
+
+def native_observation(robot: Articulation, joint_ids: list[int], last_action: torch.Tensor, command: tuple[float, float, float], mirror: bool = False) -> torch.Tensor:
+    gravity = torch.tensor([[0.0, 0.0, -1.0]], device=robot.device)
+    projected_gravity = quat_apply_inverse(robot.data.root_quat_w, gravity)
+    command_tensor = torch.tensor([list(command)], device=robot.device)
+    joint_pos = robot.data.joint_pos[:, joint_ids].clone()
+    joint_pos[:, 12:] = 0.0
+    joint_pos -= DEFAULT_POSE.to(robot.device)
+    joint_vel = robot.data.joint_vel[:, joint_ids] * 0.05
+    observation = torch.cat([robot.data.root_ang_vel_b * 0.25, projected_gravity, command_tensor, joint_pos, joint_vel, last_action], dim=-1)
+    if mirror:
+        observation[:, 0:3] *= MIRROR_ANGULAR_VELOCITY.to(robot.device)
+        observation[:, 3:6] *= MIRROR_POLAR_VECTOR.to(robot.device)
+        for start in (9, 25, 41):
+            observation[:, start:start + 16] = observation[:, start:start + 16][:, MIRROR_PERM.to(robot.device)] * MIRROR_SIGN.to(robot.device)
+    return observation
+
+
+def mirror_action(action: torch.Tensor) -> torch.Tensor:
+    return action[:, MIRROR_PERM.to(action.device)] * MIRROR_SIGN.to(action.device)
+
+
+def rgb_small(camera) -> torch.Tensor:
+    image = camera.data.output["rgb"][0, ..., :3].detach().cpu().numpy().astype(np.uint8)
+    image = cv2.resize(image, (80, 48), interpolation=cv2.INTER_AREA)
+    return torch.from_numpy(image)
+
+
+def lidar_scan(lidar) -> torch.Tensor:
+    hits = lidar.data.ray_hits_w[0]
+    origin = lidar.data.pos_w[0].unsqueeze(0)
+    values = torch.linalg.vector_norm(hits - origin, dim=-1)
+    return torch.nan_to_num(values, nan=20.0, posinf=20.0, neginf=0.0).clamp(0.0, 20.0).detach().cpu().float().div_(20.0)
+
+
+def high_level_proprio(robot: Articulation, joint_ids: list[int], last_action: torch.Tensor) -> torch.Tensor:
+    # The high-level policy is trained without privileged expert command or
+    # expert action history.  It must remain closed under its own low-level
+    # actions during replay.
+    zero_action = torch.zeros_like(last_action)
+    return native_observation(robot, joint_ids, zero_action, (0.0, 0.0, 0.0), mirror=False)
+
+
+def reset_scene(scene: InteractiveScene) -> None:
+    robot = scene["robot"]
+    robot.reset()
+    root_state = robot.data.default_root_state.clone()
+    root_state[:, :3] += scene.env_origins
+    robot.write_root_pose_to_sim(root_state[:, :7])
+    robot.write_root_velocity_to_sim(root_state[:, 7:])
+    robot.write_joint_state_to_sim(robot.data.default_joint_pos, robot.data.default_joint_vel)
+    scene.reset()
+
+
+def main() -> None:
+    payload = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    config = payload.get("config", {})
+    model = M20VLASkillPolicy(config.get("architecture", "spatial_v2"))
+    model.load_state_dict(payload["model_state_dict"])
+    model_device = torch.device(args.model_device if torch.cuda.is_available() or not args.model_device.startswith("cuda") else "cpu")
+    model.to(model_device).eval()
+    session = ort.InferenceSession(str(args.policy), providers=["CPUExecutionProvider"])
+    if session.get_inputs()[0].shape != [1, 57] or session.get_outputs()[0].shape != [1, 16]:
+        raise RuntimeError("Native M20 policy is not the expected 57->16 model")
+    args.video_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = args.metrics or args.video_dir / "m20-vla-skill-step-0.json"
+    sim = SimulationContext(SimulationCfg(dt=0.005, render_interval=4, device=args.device or "cuda:0"))
+    scene = InteractiveScene(SkillSceneCfg(num_envs=1, env_spacing=3.0, replicate_physics=True))
+    sim.reset()
+    scene.update(sim.get_physics_dt())
+    robot: Articulation = scene["robot"]
+    joint_ids, names = robot.find_joints(POLICY_JOINT_NAMES, preserve_order=True)
+    if names != POLICY_JOINT_NAMES:
+        raise RuntimeError(f"M20 policy order mismatch: {names}")
+    leg_ids, wheel_ids = joint_ids[:12], joint_ids[12:]
+    front, rear, lidar, third = scene["front_camera"], scene["rear_camera"], scene["lidar"], scene["third_person"]
+    default_pose = DEFAULT_POSE.to(robot.device).unsqueeze(0)
+    leg_scale = LEG_SCALE.to(robot.device).unsqueeze(0)
+    zero_wheels = torch.zeros((1, 4), device=robot.device)
+    reset_scene(scene)
+    for _ in range(args.warmup_steps):
+        robot.set_joint_position_target(default_pose[:, :12], joint_ids=leg_ids)
+        robot.set_joint_velocity_target(zero_wheels, joint_ids=wheel_ids)
+        scene.write_data_to_sim()
+        for _ in range(4):
+            sim.step(render=False)
+            scene.update(sim.get_physics_dt())
+    last_low_level_action = torch.zeros((1, 16), device=robot.device)
+    language = encode_text(args.task_text).to(model_device).unsqueeze(0)
+    start_xy = robot.data.root_pos_w[0, :2].clone()
+    start_quat = robot.data.root_quat_w[0].detach().cpu().numpy()
+    start_yaw = float(np.arctan2(2.0 * (start_quat[0] * start_quat[3] + start_quat[1] * start_quat[2]), 1.0 - 2.0 * (start_quat[2] ** 2 + start_quat[3] ** 2)))
+    min_height = max_height = float(robot.data.root_pos_w[0, 2].item())
+    min_target_distance = float("inf")
+    target_reached = args.target_color == "none"
+    target_reached_step = None
+    stop_triggered_step = None
+    stop_confidence_streak = 0
+    stop_votes: deque[bool] = deque(maxlen=args.stop_vote_window)
+    terminated_steps = 0
+    command_sum = np.zeros(3, dtype=np.float64)
+    command_count = 0
+    skill_counts: Counter[str] = Counter()
+    video_path = args.video_dir / "m20-vla-skill-step-0.mp4"
+    video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
+    if not video.isOpened():
+        raise RuntimeError(f"Unable to open video writer: {video_path}")
+    cached_command = (0.0, 0.0, 0.0)
+    cached_skill = "stop"
+    stop_latched = False
+    turn_streak = 0
+    recovery_remaining = 0
+    last_nonstop_command = (args.max_forward_command, 0.0, 0.0)
+    try:
+        for step in range(args.steps):
+            if recovery_remaining > 0:
+                cached_skill = "forward_recovery"
+                cached_command = (args.max_forward_command, 0.0, 0.0)
+                recovery_remaining -= 1
+                stop_confidence_streak = 0
+                stop_votes.clear()
+            elif step % args.command_hold_steps == 0:
+                front_image = rgb_small(front)
+                rear_image = rgb_small(rear)
+                rgb = torch.cat((front_image, rear_image), dim=-1).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).to(model_device)
+                scan = lidar_scan(lidar).unsqueeze(0).to(model_device)
+                proprio = high_level_proprio(robot, joint_ids, last_low_level_action).to(model_device)
+                with torch.inference_mode():
+                    command_norm, skill_logits = model(rgb, scan, proprio, language)
+                command_np = (command_norm[0].detach().cpu().numpy() * COMMAND_SCALE.numpy()).astype(np.float32)
+                skill_index = int(skill_logits[0].argmax().item())
+                cached_skill = SKILL_NAMES[skill_index]
+                # Turn/translation are canonicalized before reaching the
+                # native expert.  This keeps regression noise in the command
+                # head from turning a discrete skill into a curved skid.
+                if cached_skill == "left":
+                    turn_streak += 1
+                    if turn_streak > args.max_turn_steps:
+                        recovery_remaining = args.turn_recovery_steps
+                        cached_skill = "forward_recovery"
+                        cached_command = (args.max_forward_command, 0.0, 0.0)
+                        turn_streak = 0
+                    else:
+                        cached_command = (0.0, 0.0, min(max(abs(float(command_np[2])), 0.12), args.max_yaw_command))
+                elif cached_skill == "right":
+                    turn_streak += 1
+                    if turn_streak > args.max_turn_steps:
+                        recovery_remaining = args.turn_recovery_steps
+                        cached_skill = "forward_recovery"
+                        cached_command = (args.max_forward_command, 0.0, 0.0)
+                        turn_streak = 0
+                    else:
+                        cached_command = (0.0, 0.0, -min(max(abs(float(command_np[2])), 0.12), args.max_yaw_command))
+                elif cached_skill == "forward":
+                    turn_streak = 0
+                    cached_command = (min(max(float(command_np[0]), 0.0), args.max_forward_command), 0.0, 0.0)
+                elif cached_skill == "backward":
+                    turn_streak = 0
+                    cached_command = (max(min(float(command_np[0]), 0.0), -args.max_forward_command), 0.0, 0.0)
+                elif cached_skill in {"stop", "search", "jump"}:
+                    turn_streak = 0
+                    # A stop prediction is only a candidate until its
+                    # confidence streak is confirmed.  Keep moving with the
+                    # last non-stop command during that confirmation window,
+                    # otherwise the gate would stop before the target radius.
+                    cached_command = (0.0, 0.0, 0.0) if stop_latched else last_nonstop_command
+                else:
+                    turn_streak = 0
+                stop_probability = float(torch.softmax(skill_logits, dim=-1)[0, SKILL_NAMES.index("stop")].item())
+                if stop_probability >= args.stop_threshold and cached_skill == "stop":
+                    stop_confidence_streak += 1
+                    stop_votes.append(True)
+                else:
+                    stop_confidence_streak = 0
+                    stop_votes.append(False)
+                vote_stop = len(stop_votes) == args.stop_vote_window and sum(stop_votes) >= args.stop_vote_fraction * args.stop_vote_window
+                if stop_confidence_streak >= args.stop_confirm_steps or vote_stop:
+                    stop_latched = True
+                    if stop_triggered_step is None:
+                        stop_triggered_step = step
+                if cached_skill not in {"stop", "search", "jump"} and cached_skill != "forward_recovery":
+                    last_nonstop_command = cached_command
+                if args.debug_steps and step < args.debug_steps:
+                    print(f"[M20PRO-SKILL-DEBUG] step={step} skill={cached_skill} stop_p={stop_probability:.3f} command={cached_command}", flush=True)
+            command = (0.0, 0.0, 0.0) if stop_latched else cached_command
+            command_sum += np.asarray(command)
+            command_count += 1
+            skill_counts[cached_skill] += 1
+            low_level_command = command
+            mirror = args.mirror_negative_yaw and low_level_command[2] < -1e-6
+            policy_command = (low_level_command[0], low_level_command[1], abs(low_level_command[2])) if mirror else low_level_command
+            low_obs = native_observation(robot, joint_ids, last_low_level_action, policy_command, mirror=mirror)
+            action_np = session.run(["actions"], {"obs": low_obs.detach().cpu().numpy()})[0]
+            action = torch.from_numpy(action_np).to(robot.device, dtype=torch.float32)
+            if mirror:
+                action = mirror_action(action)
+            leg_target = default_pose[:, :12] + action[:, :12] * leg_scale
+            robot.set_joint_position_target(leg_target, joint_ids=leg_ids)
+            robot.set_joint_velocity_target(action[:, 12:] * WHEEL_SCALE, joint_ids=wheel_ids)
+            last_low_level_action = action
+            camera_target = robot.data.root_pos_w + torch.tensor([[0.0, 0.0, 0.1]], device=robot.device)
+            third.set_world_poses_from_view(camera_target + torch.tensor([[-1.4, 1.4, 0.85]], device=robot.device), camera_target)
+            for _ in range(4):
+                scene.write_data_to_sim()
+                sim.step()
+                scene.update(sim.get_physics_dt())
+            frame = third.data.output["rgb"][0, ..., :3].detach().cpu().numpy().astype(np.uint8)
+            video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            height = float(robot.data.root_pos_w[0, 2].item())
+            min_height, max_height = min(min_height, height), max(max_height, height)
+            gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
+            terminated_steps += int(height < 0.45 or gravity_z > -0.5)
+            if args.target_color != "none":
+                target_xy = torch.tensor([args.target_x, args.target_y], device=robot.device)
+                distance = float(torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - target_xy).item())
+                min_target_distance = min(min_target_distance, distance)
+                if not target_reached and distance <= 0.8:
+                    target_reached = True
+                    target_reached_step = step
+    finally:
+        video.release()
+    displacement = (robot.data.root_pos_w[0, :2] - start_xy).detach().cpu().numpy()
+    current_quat = robot.data.root_quat_w[0].detach().cpu().numpy()
+    current_yaw = float(np.arctan2(2.0 * (current_quat[0] * current_quat[3] + current_quat[1] * current_quat[2]), 1.0 - 2.0 * (current_quat[2] ** 2 + current_quat[3] ** 2)))
+    yaw_delta = float(np.arctan2(np.sin(current_yaw - start_yaw), np.cos(current_yaw - start_yaw)))
+    final_distance = None
+    if args.target_color != "none":
+        final_distance = float(torch.linalg.vector_norm(robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)).item())
+    stable = terminated_steps == 0 and min_height >= 0.45
+    success = stable and (args.target_color == "none" or (target_reached and stop_triggered_step is not None))
+    metrics = {
+        "format": "m20_vla_two_layer_replay_v1", "checkpoint": str(args.checkpoint), "low_level_policy": str(args.policy),
+        "task_text": args.task_text, "target_color": args.target_color,
+        "target_xy": [args.target_x, args.target_y] if args.target_color != "none" else None,
+        "target_coordinates_used_by_policy": False, "steps": args.steps, "command_hold_steps": args.command_hold_steps,
+        "stop_threshold": args.stop_threshold, "stop_confirm_steps": args.stop_confirm_steps,
+        "stop_vote_window": args.stop_vote_window, "stop_vote_fraction": args.stop_vote_fraction,
+        "max_turn_steps": args.max_turn_steps, "turn_recovery_steps": args.turn_recovery_steps,
+        "max_yaw_command": args.max_yaw_command, "max_forward_command": args.max_forward_command,
+        "displacement_xy": displacement.tolist(), "yaw_delta": yaw_delta,
+        "min_root_height": min_height, "max_root_height": max_height, "terminated_steps": terminated_steps,
+        "target_reached": target_reached, "target_reached_step": target_reached_step,
+        "stop_triggered_step": stop_triggered_step, "min_target_distance": None if args.target_color == "none" else min_target_distance,
+        "final_target_distance": final_distance, "skill_counts": dict(skill_counts),
+        "mean_command": (command_sum / max(command_count, 1)).tolist(), "success": success, "video": str(video_path),
+    }
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n")
+    print(f"[M20PRO-SKILL-PLAY] displacement_xy={displacement.tolist()} yaw_delta={yaw_delta:.4f} rad", flush=True)
+    print(f"[M20PRO-SKILL-PLAY] min_root_height={min_height:.4f} m terminated_steps={terminated_steps}", flush=True)
+    print(f"[M20PRO-SKILL-PLAY] target_reached={target_reached} stop_step={stop_triggered_step} min_distance={min_target_distance:.4f} m success={success}", flush=True)
+    print(f"[M20PRO-SKILL-PLAY] skill_counts={dict(skill_counts)}", flush=True)
+    print(f"[M20PRO-SKILL-PLAY] video={video_path}", flush=True)
+    print(f"[M20PRO-SKILL-PLAY] metrics={metrics_path}", flush=True)
+    scene.reset()
+    sim.clear_instance()
+
+
+try:
+    main()
+finally:
+    app.close()

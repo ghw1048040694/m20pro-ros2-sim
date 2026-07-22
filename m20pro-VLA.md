@@ -294,6 +294,27 @@ VLA 红色目标闭环回放（wrapper 自动带 `--headless --video`，并写 M
   --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_m20_native_v1
 ```
 
+训练两层高层 VLA 技能选择器（监督模仿，不使用奖励函数）：
+
+```bash
+./scripts/train_m20_vla_skill.sh \
+  --epochs 60 --batch-size 64 --post-reach-steps 20 --device cuda:0 \
+  --output-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v7
+```
+
+两层 VLA 红色目标回放（高层 CPU 推理、低层公开 M20 ONNX、自动写视频）：
+
+```bash
+export M20PRO_USD_PATH=/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/assets/m20_mjcf_official_nofloor_v6.usd
+./scripts/play_m20_vla_skill.sh \
+  --checkpoint /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/checkpoints/m20_vla_skill_v7/best.pt \
+  --policy /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/public_experts/m20_native/policy.onnx \
+  --task-text "到红色方块去" --target-color red --target-x 2.5 --target-y 0.0 \
+  --steps 300 --warmup-steps 75 --model-device cpu \
+  --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/m20_vla_skill_v7/red \
+  --metrics /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/logs/m20_vla_skill_v7_red.json
+```
+
 ## PPO / TensorBoard 指标词典
 
 ### 当前 locomotion 奖励函数
@@ -364,11 +385,21 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 
 下一轮应优先采集多个初始姿态、目标距离和目标横向位置的 DAgger 轨迹，并以“到达后 0.8 m 内保持 2 s、根高 >= 0.45 m、无倒地”为验收；在此之前不再增加 epoch，也不进入 1 m jump 集成。
 
+### 两层 VLA 技能策略 v1-v7（2026-07-22）
+
+- 新增 [m20_vla_skill_model.py](scripts/m20_vla_skill_model.py)、[train_m20_vla_skill.py](scripts/train_m20_vla_skill.py) 和 [play_m20_vla_skill.py](scripts/play_m20_vla_skill.py)。高层模型输入前后 RGB、72 线 LiDAR、去除专家 command/action history 的 57 维 proprio 和语言，输出 `forward/backward/left/right/stop/search/jump` 技能以及给 M20 原生 ONNX 的 3 维 command；低层仍是公开 `AI-DA-STC/M20-autonomy-sim` 的 `57 -> 16` 专家，不使用 PPO 奖励。
+- 修正了两项数据/闭环问题：到达后只保留 20 帧停车样本，避免静止尾段淹没滚动数据；慢速接近命令（约 `0.045 m/s`）不能按 stop 标注，只有明确全零命令才是 stop。当前 v7 checkpoint 位于 `checkpoints/m20_vla_skill_v7/best.pt`，16 条成功专家 episode、2004 个训练帧，验证技能准确率约 `0.90`，标签覆盖 `forward/backward/left/right/stop`；`search/jump` 仍为零标签。
+- 红色目标 `(2.5, 0.0)` 两层闭环通过：`target_reached=true`、最小距离 `0.7376 m`、停止后稳定、`terminated_steps=0`。关键视频：`videos/m20_vla_skill_v4/red_center/`。
+- 绿色目标 `(2.5, 0.4)` 两层闭环通过：`target_reached=true`、最小距离 `0.6346 m`、停止步 `121`、`terminated_steps=0`。关键视频：`videos/m20_vla_skill_v5/green_left04/`。
+- 蓝色正前方目标能识别并接近，但当前固定停止确认窗口的指标为 `0.8005–0.8482 m`，尚未按严格 `0.8 m` 验收；蓝色横向目标能进入半径但最终不停车，且 yaw/横向转向不足。当前结论是两层接口和 RGB 目标识别已建立，主动搜索、任意横向方位和稳定停车尚未完成。
+- 新增成功专家数据：红色 `(2.2,0.25)`、绿色 `(2.8,0.8)`、绿色近距 `(1.5,0.4)`、蓝色负向镜像 `(3.0,-0.75)`、蓝色近距 `(1.5,-0.4)`；失败的蓝色负转弯和红色远距轨迹已删除，不进入训练集。
+- 当前两层回放命令必须包含 `--headless --video`。停止候选使用连续确认/投票，只负责耗散接近目标时的惯性；它没有读取目标坐标，目标坐标只用于离线指标。
+
 ## 待办路线
 
-1. 为颜色目标增加随机距离、横向位置、相机视角和无目标负样本，再训练主动转向与视觉搜索，而不是只在固定直线路径上验收。
-2. 解决 jump skill 的物理能力问题：优先查找官方动作/仿真协议或调整 M20 USD/执行器，未通过高度、越障和视频检查不得进入 VLA 数据。
-3. 将 VLA 数据集扩展为 LeRobot-compatible episode/skill schema，加入 rolling/jump skill token 和 action chunk。
+1. 为高层增加真实 `search` 轨迹和后视相机闭环：目标放在侧后方，训练转向/扫描/重新获取目标，而不是把横向进入半径当作成功。
+2. 解决 jump skill 的物理能力问题：优先查找官方动作/仿真协议或调整 M20 USD/执行器，未通过高度、越障、着地稳定和视频检查不得进入 VLA 数据。
+3. 将成功 rolling/search/jump 数据扩展为 LeRobot-compatible episode/skill schema，保留专家来源、传感器时间戳和视频索引。
 4. 在具备成功 jump expert 后加入随机障碍、1 m 越障、地图/无地图和开放词汇物体搜索评测。
 5. 训练高层语言/视觉/LiDAR skill selector，并用闭环视频和任务成功率验收，而不是只看离线 loss。
 
