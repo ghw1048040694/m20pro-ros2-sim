@@ -79,6 +79,7 @@ parser.add_argument("--model-device", default="cpu")
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIR)
 parser.add_argument("--metrics", type=Path, default=None)
 parser.add_argument("--initial-height", type=float, default=0.54)
+parser.add_argument("--initial-yaw-deg", type=float, default=0.0)
 parser.add_argument("--mirror-negative-yaw", action="store_true")
 parser.add_argument("--debug-steps", type=int, default=0)
 parser.add_argument("--video", action="store_true", help="Required: record an inspectable MP4.")
@@ -245,11 +246,17 @@ def high_level_proprio(robot: Articulation, joint_ids: list[int], last_action: t
     return native_observation(robot, joint_ids, zero_action, (0.0, 0.0, 0.0), mirror=False)
 
 
-def reset_scene(scene: InteractiveScene) -> None:
+def reset_scene(scene: InteractiveScene, initial_yaw_rad: float) -> None:
     robot = scene["robot"]
     robot.reset()
     root_state = robot.data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
+    half_yaw = 0.5 * initial_yaw_rad
+    root_state[:, 3:7] = torch.tensor(
+        [[np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)]],
+        dtype=root_state.dtype,
+        device=root_state.device,
+    )
     robot.write_root_pose_to_sim(root_state[:, :7])
     robot.write_root_velocity_to_sim(root_state[:, 7:])
     robot.write_joint_state_to_sim(robot.data.default_joint_pos, robot.data.default_joint_vel)
@@ -292,7 +299,7 @@ def main() -> None:
     default_pose = DEFAULT_POSE.to(robot.device).unsqueeze(0)
     leg_scale = LEG_SCALE.to(robot.device).unsqueeze(0)
     zero_wheels = torch.zeros((1, 4), device=robot.device)
-    reset_scene(scene)
+    reset_scene(scene, float(np.deg2rad(args.initial_yaw_deg)))
     for _ in range(args.warmup_steps):
         robot.set_joint_position_target(default_pose[:, :12], joint_ids=leg_ids)
         robot.set_joint_velocity_target(zero_wheels, joint_ids=wheel_ids)
@@ -650,6 +657,7 @@ def main() -> None:
         "format": "m20_vla_two_layer_replay_v2", "checkpoint": str(args.checkpoint), "low_level_policy": str(args.policy),
         "task_text": args.task_text, "target_color": args.target_color,
         "target_xy": [args.target_x, args.target_y] if args.target_color != "none" else None,
+        "initial_yaw_deg": args.initial_yaw_deg,
         "target_radius": args.target_radius, "target_hold_steps_required": args.target_hold_steps,
         "target_coordinates_used_by_policy": False, "steps": args.steps, "command_hold_steps": args.command_hold_steps,
         "stop_threshold": args.stop_threshold, "target_threshold": args.target_threshold,

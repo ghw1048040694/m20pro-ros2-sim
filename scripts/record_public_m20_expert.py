@@ -84,6 +84,11 @@ parser.add_argument("--image-height", type=int, default=96)
 parser.add_argument("--video", action="store_true", help="Required: write one MP4 per episode.")
 parser.add_argument("--dagger-checkpoint", type=Path, default=None, help="Optional VLA checkpoint used for mixed DAgger rollouts.")
 parser.add_argument("--dagger-alpha", type=float, default=0.75, help="Fraction of the public expert action used during a DAgger rollout.")
+parser.add_argument("--dagger-skill-checkpoint", type=Path, default=None, help="Optional high-level skill VLA used to visit states labeled by the public expert.")
+parser.add_argument("--dagger-skill-expert-probability", type=float, default=0.25)
+parser.add_argument("--dagger-skill-min-forward", type=float, default=0.08)
+parser.add_argument("--dagger-skill-max-forward", type=float, default=0.35)
+parser.add_argument("--dagger-skill-max-yaw", type=float, default=0.5)
 parser.add_argument("--dagger-model-device", default="cpu", help="Device for the optional DAgger VLA model.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -119,8 +124,18 @@ if not args.policy.is_file():
     parser.error(f"M20 policy not found: {args.policy}")
 if args.dagger_checkpoint is not None and not args.dagger_checkpoint.is_file():
     parser.error(f"DAgger checkpoint not found: {args.dagger_checkpoint}")
+if args.dagger_skill_checkpoint is not None and not args.dagger_skill_checkpoint.is_file():
+    parser.error(f"Skill DAgger checkpoint not found: {args.dagger_skill_checkpoint}")
+if args.dagger_checkpoint is not None and args.dagger_skill_checkpoint is not None:
+    parser.error("Use either --dagger-checkpoint or --dagger-skill-checkpoint, not both")
 if not 0.0 <= args.dagger_alpha <= 1.0:
     parser.error("--dagger-alpha must be in [0, 1]")
+if not 0.0 <= args.dagger_skill_expert_probability <= 1.0:
+    parser.error("--dagger-skill-expert-probability must be in [0, 1]")
+if not 0.0 < args.dagger_skill_min_forward <= args.dagger_skill_max_forward:
+    parser.error("Skill DAgger forward limits are invalid")
+if args.dagger_skill_max_yaw <= 0.0:
+    parser.error("--dagger-skill-max-yaw must be positive")
 args.enable_cameras = True
 app = AppLauncher(args).app
 
@@ -136,6 +151,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import onnxruntime as ort  # noqa: E402
 import torch  # noqa: E402
 from m20_vla_model import M20VLAActionChunk  # noqa: E402
+from m20_vla_skill_model import (  # noqa: E402
+    COMMAND_SCALE,
+    SKILL_NAMES,
+    M20VLASkillPolicy,
+)
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.actuators import DCMotorCfg  # noqa: E402
@@ -390,6 +410,33 @@ def encode_text(text: str, max_length: int = 32) -> torch.Tensor:
     tokens = np.zeros(max_length, dtype=np.int64)
     tokens[: len(values)] = values
     return torch.from_numpy(tokens)
+
+
+def canonical_skill_command(
+    command_norm: torch.Tensor,
+    skill_logits: torch.Tensor,
+) -> tuple[tuple[float, float, float], str]:
+    command = command_norm[0].detach().cpu() * COMMAND_SCALE
+    skill = SKILL_NAMES[int(skill_logits[0].argmax().item())]
+    if skill == "left":
+        yaw = min(max(abs(float(command[2])), 0.12), args.dagger_skill_max_yaw)
+        return (0.0, 0.0, yaw), skill
+    if skill == "right":
+        yaw = min(max(abs(float(command[2])), 0.12), args.dagger_skill_max_yaw)
+        return (0.0, 0.0, -yaw), skill
+    if skill == "backward":
+        forward = max(min(float(command[0]), 0.0), -args.dagger_skill_max_forward)
+        return (forward, 0.0, 0.0), skill
+    if skill == "search":
+        yaw = args.dagger_skill_max_yaw if float(command[2]) >= 0.0 else -args.dagger_skill_max_yaw
+        return (0.0, 0.0, yaw), skill
+    if skill in {"stop", "jump"}:
+        return (0.0, 0.0, 0.0), skill
+    forward = min(
+        max(float(command[0]), args.dagger_skill_min_forward),
+        args.dagger_skill_max_forward,
+    )
+    return (forward, 0.0, 0.0), "forward"
 
 
 def reset_scene(scene: InteractiveScene, initial_yaw_rad: float) -> None:

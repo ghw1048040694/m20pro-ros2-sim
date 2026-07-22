@@ -450,7 +450,16 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - [record_public_m20_expert.py](scripts/record_public_m20_expert.py) 新增 `--initial-yaw-deg`、`--initial-yaw-jitter-deg` 和 `--seed`。每条 episode 在重置时写入可复现 yaw，并在 HDF5 保存 `initial_yaw_deg/random_seed`；`episode_offset` 会跳过已有随机序列，追加采集不会重复样本。
 - 专家仍来自公开 `AI-DA-STC/M20-autonomy-sim` 的 `57 -> 16` ONNX 策略；目标坐标只用于生成成功示范和离线标签，不进入 VLA 输入，全程没有 simulator reward 或 PPO。
 - `m20_skill_expert_random_yaw_red_v1` 已采集三条 500 帧成功轨迹，初始 yaw 为 `+10.958/-2.445/+14.344 deg`，最终距离为 `0.7616/0.7903/0.7867 m`，最低根高 `0.4613-0.4643 m`、`terminated_steps=0`。三份 HDF5 的前后 RGB、LiDAR、proprio、state、action 和 expert command 均长度一致、数值有限；三条 H.264 视频均完整解码。
-- 新数据约 `48 MB`、视频约 `688 KB`，全部在 2 TB 盘。当前关键产物合计约 `324 MB`：数据集 `239 MB`、公开专家 `56 MB`、checkpoint `14 MB`、视频 `13 MB`、日志 `2.7 MB`；`62/62` 个 MP4 均为 H.264，完整逐帧解码失败数为 `0`。下一步从 v14 初始化并冻结动作主干，只重训独立 `visual_v2` target encoder，然后对随机初始朝向做未见场景闭环验收。
+- 新数据约 `48 MB`、视频约 `688 KB`，全部在 2 TB 盘。完成该轮采集时，关键产物合计约 `324 MB`，`62/62` 个 MP4 均为 H.264 且完整逐帧解码失败数为 `0`。随后已按计划训练 v15/v16 并执行未见朝向闭环，结果记录如下。
+
+### 随机朝向 v15-v16 与高层 DAgger 决策（2026-07-22）
+
+- `m20_eval_random_yaw_red_holdout_v1` 固定初始 yaw 为 `-12 deg`，没有进入 v15/v16 的训练 glob。离线评估中，v14 在该 holdout 上的距离相关系数/MAE/stop accuracy 为 `0.757/0.356 m/0.790`，v15 提升到 `0.954/0.171 m/0.966`；v15 最佳 checkpoint 位于第 `7` 轮，`val_target_loss=0.05151`。这说明随机视角数据改善了离线表征，但不能替代闭环验收。
+- v15 在同一个 `-12 deg` 红色目标闭环中真实最小距离为 `0.4652 m`，但预测最小距离仍为 `1.0162 m`；420 步中输出 `forward=413/stop=7`，没有形成 stop latch，最终距离 `5.1897 m`，因此 `success=false`。v16 从 v15 初始化，仅开放 command/skill/target 导航头训练；结果几乎相同，真实/预测最小距离为 `0.4651/1.1437 m`、`forward=413/stop=7`、最终距离 `5.1870 m`，仍未停车。两次均 `terminated_steps=0`，失败原因是 learner 闭环状态分布下的距离预测和动作决策偏移，不是摔倒。
+- [play_m20_vla_skill.py](scripts/play_m20_vla_skill.py) 已支持 `--initial-yaw-deg` 并将其写入 metrics；[train_m20_vla_skill.py](scripts/train_m20_vla_skill.py) 已支持冻结传感器主干时用 `--train-navigation-heads` 适配 command/skill head。继续增加 epoch 或只调输出头已经被 v15/v16 证伪。
+- [record_public_m20_expert.py](scripts/record_public_m20_expert.py) 当前只加入了 high-level skill DAgger 的参数校验、模型类型和 canonical command 转换脚手架，尚未把 learner command、公开专家概率干预和 HDF5 标签接入主循环，因此还不能用于采集，也没有生成或宣称 DAgger skill 数据。
+- 下一步固定为：完成高层 DAgger 主循环；在 learner `-12 deg` 状态分布上用公开 M20 专家以 `0.25-0.5` 概率干预 command，始终保存当前状态的专家 command/action 标签；验证 HDF5、H.264 视频和稳定性后训练 v17。加入 `-12 deg` 数据后，泛化验收必须改用未参与训练的 `+20 deg` 或 `-8 deg`。
+- 最新存储审计：datasets `254 MB`、public experts `56 MB`、checkpoints `20 MB`、videos `14 MB`、logs `3.4 MB`。全盘实际存在 `63` 个 MP4，编码检查为 `63/63 H.264`，FFmpeg 完整逐帧解码失败数为 `0`。
 
 v14 绿色目标复现命令（显式无头并录制视频）：
 
@@ -468,11 +477,11 @@ python scripts/play_m20_vla_skill.py --headless --video \
 
 ## 待办路线
 
-1. 为高层增加真实 `search` 轨迹和后视相机闭环：目标放在侧后方，训练转向/扫描/重新获取目标，而不是把横向进入半径当作成功。
-2. 解决 jump skill 的物理能力问题：优先查找官方动作/仿真协议或调整 M20 USD/执行器，未通过高度、越障、着地稳定和视频检查不得进入 VLA 数据。
-3. 将成功 rolling/search/jump 数据扩展为 LeRobot-compatible episode/skill schema，保留专家来源、传感器时间戳和视频索引。
-4. 在具备成功 jump expert 后加入随机障碍、1 m 越障、地图/无地图和开放词汇物体搜索评测。
-5. 训练高层语言/视觉/LiDAR skill selector，并用闭环视频和任务成功率验收，而不是只看离线 loss。
+1. 完成 high-level skill DAgger，采集 learner 闭环分布上的专家 command/action 标签，训练 v17，并在未见初始朝向上做带视频验收。
+2. 为高层增加真实 `search` 轨迹和后视相机闭环：目标放在侧后方，训练转向/扫描/重新获取目标，而不是把横向进入半径当作成功。
+3. 解决 jump skill 的物理能力问题：优先查找官方动作/仿真协议或调整 M20 USD/执行器，未通过高度、越障、着地稳定和视频检查不得进入 VLA 数据。
+4. 将成功 rolling/search/jump 数据扩展为 LeRobot-compatible episode/skill schema，保留专家来源、传感器时间戳和视频索引。
+5. 在具备成功 jump expert 后加入随机障碍、1 m 越障、地图/无地图和开放词汇物体搜索评测；所有 VLA checkpoint 都以闭环视频和任务成功率验收，而不是只看离线 loss。
 
 ### 并行环境容量基准
 

@@ -47,6 +47,11 @@ parser.add_argument("--skill-loss-weight", type=float, default=0.5)
 parser.add_argument("--post-reach-steps", type=int, default=20, help="Keep at most this many stop frames after a successful target reach.")
 parser.add_argument("--init-checkpoint", type=Path, default=None)
 parser.add_argument("--freeze-backbone", action="store_true", help="Train only skill_head; used to add skills without forgetting navigation.")
+parser.add_argument(
+    "--train-navigation-heads",
+    action="store_true",
+    help="With --freeze-backbone, also adapt command_head and skill_head while keeping sensor features fixed.",
+)
 parser.add_argument("--search-head", action="store_true", help="Add an isolated language search-intent head.")
 parser.add_argument("--search-loss-weight", type=float, default=1.0)
 parser.add_argument("--target-head", action="store_true", help="Add a learned target-reached stop head.")
@@ -61,6 +66,8 @@ parser.add_argument("--target-stop-pos-weight", type=float, default=1.0)
 args = parser.parse_args()
 if args.freeze_backbone and args.init_checkpoint is None:
     parser.error("--freeze-backbone requires --init-checkpoint")
+if args.train_navigation_heads and not args.freeze_backbone:
+    parser.error("--train-navigation-heads requires --freeze-backbone")
 if args.target_stop_pos_weight <= 0.0:
     parser.error("--target-stop-pos-weight must be positive")
 
@@ -371,12 +378,15 @@ def main() -> None:
         model.load_state_dict(payload["model_state_dict"], strict=False)
     if args.freeze_backbone:
         for name, parameter in model.named_parameters():
-            parameter.requires_grad = (
+            trainable = (
                 (args.search_head and name.startswith("search_head."))
                 or (args.target_head and name.startswith("target_"))
-                if (args.search_head or args.target_head)
-                else (name.startswith("language.") or name.startswith("skill_head."))
             )
+            if not (args.search_head or args.target_head):
+                trainable = name.startswith("language.") or name.startswith("skill_head.")
+            if args.train_navigation_heads:
+                trainable = trainable or name.startswith(("command_head.", "skill_head."))
+            parameter.requires_grad = trainable
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=args.learning_rate,
@@ -399,6 +409,7 @@ def main() -> None:
         "reward_used": False,
         "init_checkpoint": None if args.init_checkpoint is None else str(args.init_checkpoint),
         "freeze_backbone": args.freeze_backbone,
+        "train_navigation_heads": args.train_navigation_heads,
         "search_head": args.search_head,
         "search_loss_weight": args.search_loss_weight,
         "target_head": args.target_head,
