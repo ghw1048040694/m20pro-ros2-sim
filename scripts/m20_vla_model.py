@@ -7,10 +7,11 @@ from torch import nn
 
 
 class M20VLAActionChunk(nn.Module):
-    def __init__(self, horizon: int, architecture: str = "global_v1"):
+    def __init__(self, horizon: int, architecture: str = "global_v1", stop_head: bool = False):
         super().__init__()
         self.horizon = horizon
         self.architecture = architecture
+        self.stop_head_enabled = stop_head
         if architecture not in {"global_v1", "spatial_v2"}:
             raise ValueError(f"Unsupported M20 VLA architecture: {architecture}")
         image_pool = nn.AdaptiveAvgPool2d(1) if architecture == "global_v1" else nn.AdaptiveAvgPool2d((3, 5))
@@ -47,8 +48,20 @@ class M20VLAActionChunk(nn.Module):
             nn.GELU(),
             nn.Linear(256, horizon * 16),
         )
+        self.stop_head = (
+            nn.Sequential(nn.Linear(image_dim + 32 + 64 + 32, 128), nn.LayerNorm(128), nn.GELU(), nn.Linear(128, 1))
+            if stop_head
+            else None
+        )
 
-    def forward(self, rgb: torch.Tensor, lidar: torch.Tensor, proprio: torch.Tensor, language: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        rgb: torch.Tensor,
+        lidar: torch.Tensor,
+        proprio: torch.Tensor,
+        language: torch.Tensor,
+        return_stop: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         image_feature = self.image(rgb)
         image_feature = self.image_projection(image_feature) if self.architecture == "spatial_v2" else image_feature.flatten(1)
         lidar_feature = self.lidar(lidar)
@@ -58,4 +71,9 @@ class M20VLAActionChunk(nn.Module):
         language_feature = (language_embedding * mask).sum(1) / mask.sum(1).clamp_min(1)
         language_feature = self.language[1:](language_feature)
         fused = torch.cat((image_feature, lidar_feature, proprio_feature, language_feature), dim=-1)
-        return self.head(fused).view(-1, self.horizon, 16)
+        action = self.head(fused).view(-1, self.horizon, 16)
+        if return_stop:
+            if self.stop_head is None:
+                raise RuntimeError("return_stop=True requires stop_head=True")
+            return action, self.stop_head(fused).squeeze(-1)
+        return action

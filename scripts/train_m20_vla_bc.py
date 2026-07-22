@@ -48,6 +48,12 @@ parser.add_argument("--learning-rate", type=float, default=1e-3)
 parser.add_argument("--val-fraction", type=float, default=0.2)
 parser.add_argument("--seed", type=int, default=20260722)
 parser.add_argument("--device", default="cuda:0")
+parser.add_argument("--smooth-weight", type=float, default=0.0, help="Temporal action smoothness weight; keep zero for native leg timing.")
+parser.add_argument("--post-reach-steps", type=int, default=40, help="Keep only this many frames after a successful target reach.")
+parser.add_argument("--stop-head", action="store_true", help="Train a separate learned target-stop classifier.")
+parser.add_argument("--stop-loss-weight", type=float, default=1.0, help="BCE weight for the learned stop classifier.")
+parser.add_argument("--init-checkpoint", type=Path, default=None, help="Optional checkpoint used to initialize the action encoder/head.")
+parser.add_argument("--freeze-action", action="store_true", help="When using --stop-head, freeze all non-stop parameters.")
 args = parser.parse_args()
 
 
@@ -68,6 +74,7 @@ class Episode:
     lidar: np.ndarray
     proprio: np.ndarray
     action: np.ndarray
+    stop_start: int | None = None
 
 
 def downsample_rgb(images: np.ndarray) -> np.ndarray:
@@ -84,7 +91,9 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
             raise FileNotFoundError(f"No episode_*.h5 files in {directory}")
         for path in paths:
             with h5py.File(path, "r") as h5:
-                if not bool(h5.attrs.get("success", False)):
+                success = bool(h5.attrs.get("success", False))
+                dagger = bool(h5.attrs.get("dagger", False))
+                if not success and not dagger:
                     print(f"[M20PRO-BC] skip diagnostic episode={path}")
                     continue
                 obs = h5["observation"]
@@ -99,6 +108,20 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                 action = np.asarray(h5["action"], dtype=np.float32)
                 if not (len(front) == len(rear) == len(lidar) == len(proprio) == len(action)):
                     raise ValueError(f"Length mismatch in {path}")
+                target_step = int(h5.attrs.get("target_reached_step", -1))
+                stop_start = target_step + 1 if target_step >= 0 else None
+                if (success or dagger) and target_step >= 0:
+                    end = min(len(action), target_step + 1 + args.post_reach_steps)
+                    front, rear, lidar, proprio, action = (
+                        front[:end], rear[:end], lidar[:end], proprio[:end], action[:end]
+                    )
+                    # Older navigation recordings kept rolling after entering
+                    # the success radius even when stop_on_target was set.
+                    # Relabel that short post-reach window as a stationary
+                    # action so the VLA learns the required visual stop state
+                    # instead of driving through the object.
+                    if (not args.stop_head) and bool(h5.attrs.get("stop_on_target", False)) and target_step + 1 < len(action):
+                        action[target_step + 1 :] = 0.0
                 if len(action) < args.horizon:
                     continue
                 if not all(np.isfinite(x).all() for x in (lidar, proprio, action)):
@@ -112,6 +135,7 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                         lidar=lidar,
                         proprio=proprio,
                         action=action,
+                        stop_start=stop_start,
                     )
                 )
     if not episodes:
@@ -148,6 +172,10 @@ class ChunkDataset(Dataset):
             "proprio": torch.from_numpy(episode.proprio[start].copy()).float(),
             "language": torch.from_numpy(encode_text(episode.task_text)),
             "target": torch.from_numpy(episode.action[start:end].copy()).float(),
+            "stop_target": torch.tensor(
+                1.0 if episode.stop_start is not None and start >= episode.stop_start else 0.0,
+                dtype=torch.float32,
+            ),
         }
 
 
@@ -156,10 +184,26 @@ def batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dic
 
 
 def loss_for(model: nn.Module, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-    prediction = model(batch["rgb"], batch["lidar"], batch["proprio"], batch["language"])
+    if args.stop_head:
+        prediction, stop_logit = model(
+            batch["rgb"], batch["lidar"], batch["proprio"], batch["language"], return_stop=True
+        )
+    else:
+        prediction = model(batch["rgb"], batch["lidar"], batch["proprio"], batch["language"])
     action_loss = torch.nn.functional.smooth_l1_loss(prediction, batch["target"])
-    smooth_loss = torch.nn.functional.smooth_l1_loss(prediction[:, 1:], prediction[:, :-1])
-    return action_loss + 0.02 * smooth_loss
+    smooth_loss = (
+        torch.nn.functional.smooth_l1_loss(prediction[:, 1:], prediction[:, :-1])
+        if prediction.shape[1] > 1
+        else prediction.new_zeros(())
+    )
+    if args.stop_head:
+        stop_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            stop_logit,
+            batch["stop_target"],
+            pos_weight=torch.tensor(4.0, device=stop_logit.device),
+        )
+        return action_loss + args.smooth_weight * smooth_loss + args.stop_loss_weight * stop_loss
+    return action_loss + args.smooth_weight * smooth_loss
 
 
 def run_epoch(model, loader, optimizer, device, train: bool) -> float:
@@ -195,7 +239,10 @@ def main() -> None:
         split_rng.shuffle(task_episodes)
         # A singleton language is too scarce to hold out.  Languages with
         # repeated demonstrations retain at least one episode for validation.
-        val_count = max(1, int(round(len(task_episodes) * args.val_fraction))) if len(task_episodes) > 1 else 0
+        if args.val_fraction <= 0.0:
+            val_count = 0
+        else:
+            val_count = max(1, int(round(len(task_episodes) * args.val_fraction))) if len(task_episodes) > 1 else 0
         val_count = min(val_count, len(task_episodes) - 1)
         val_episodes.extend(task_episodes[:val_count])
         train_episodes.extend(task_episodes[val_count:])
@@ -214,8 +261,20 @@ def main() -> None:
     train_loader = DataLoader(train_set, batch_size=args.batch_size, sampler=sampler, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True) if val_set else None
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
-    model = M20VLAActionChunk(args.horizon, architecture=args.architecture).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-5)
+    model = M20VLAActionChunk(args.horizon, architecture=args.architecture, stop_head=args.stop_head).to(device)
+    if args.init_checkpoint is not None:
+        payload = torch.load(args.init_checkpoint, map_location=device, weights_only=True)
+        model.load_state_dict(payload["model_state_dict"], strict=False)
+    if args.freeze_action:
+        if not args.stop_head:
+            raise ValueError("--freeze-action requires --stop-head")
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad = name.startswith("stop_head.")
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=args.learning_rate,
+        weight_decay=1e-5,
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config = {
@@ -235,6 +294,12 @@ def main() -> None:
         "val_episodes": [str(episode.path) for episode in val_episodes],
         "device": str(device),
         "seed": args.seed,
+        "smooth_weight": args.smooth_weight,
+        "post_reach_steps": args.post_reach_steps,
+        "stop_head": args.stop_head,
+        "stop_loss_weight": args.stop_loss_weight,
+        "init_checkpoint": None if args.init_checkpoint is None else str(args.init_checkpoint),
+        "freeze_action": args.freeze_action,
     }
     (args.output_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
     best_val = float("inf")

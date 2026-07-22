@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -30,6 +31,7 @@ TARGET_COLORS = {
     "blue": (0.03, 0.15, 0.95),
     "green": (0.04, 0.8, 0.08),
 }
+SENSOR_LINK = "base_link/base_link" if "m20_mjcf" in os.environ.get("M20PRO_USD_PATH", "") else "base_link"
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
@@ -47,6 +49,12 @@ parser.add_argument("--target-y", type=float, default=0.0)
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_ROOT)
 parser.add_argument("--metrics", type=Path, default=None, help="Optional JSON metrics path.")
 parser.add_argument("--video", action="store_true", help="Required: record an inspectable third-person MP4.")
+parser.add_argument("--debug-first-action", action="store_true", help="Print the first live observation/action for alignment checks.")
+parser.add_argument("--debug-steps", type=int, default=0, help="Print stage timings for the first N control steps.")
+parser.add_argument("--model-device", default="cpu", help="Device for VLA inference; CPU avoids CUDA/renderer contention.")
+parser.add_argument("--stop-threshold", type=float, default=0.5, help="Sigmoid threshold for the learned VLA stop head.")
+parser.add_argument("--stop-brake-gain", type=float, default=2.0, help="Body-speed gain for the learned-stop wheel brake.")
+parser.add_argument("--stop-wheel-damping", type=float, default=3.6, help="Wheel damping while the learned stop brake is active.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if not args.video:
@@ -134,21 +142,21 @@ class VLAReplaySceneCfg(InteractiveSceneCfg):
         if args.target_color != "none" else None
     )
     front_camera = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base_link/front_camera", update_period=0.02, height=96, width=160,
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}/front_camera", update_period=0.02, height=96, width=160,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955,
                                          clipping_range=(0.05, 100.0)),
         offset=CameraCfg.OffsetCfg(pos=(0.38, 0.0, 0.12), convention="world"),
     )
     rear_camera = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base_link/rear_camera", update_period=0.02, height=96, width=160,
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}/rear_camera", update_period=0.02, height=96, width=160,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955,
                                          clipping_range=(0.05, 100.0)),
         offset=CameraCfg.OffsetCfg(pos=(-0.38, 0.0, 0.12), convention="world"),
     )
     lidar = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base_link", update_period=0.02, ray_alignment="base",
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}", update_period=0.02, ray_alignment="base",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.16)),
         pattern_cfg=patterns.LidarPatternCfg(channels=1, vertical_fov_range=(0.0, 0.0),
                                               horizontal_fov_range=(-180.0, 180.0), horizontal_res=5.0),
@@ -200,6 +208,26 @@ def lidar_scan(lidar) -> torch.Tensor:
     return values.detach().cpu().float().div_(20.0)
 
 
+def apply_stop_brake(robot: Articulation, action: torch.Tensor) -> torch.Tensor:
+    """Keep VLA's stop decision, but dissipate the rolling body's inertia."""
+    body_velocity = robot.data.root_lin_vel_b[0]
+    body_angular_velocity = robot.data.root_ang_vel_b[0]
+    forward = float(torch.clamp(-args.stop_brake_gain * body_velocity[0], -0.35, 0.35).item())
+    yaw_rate = float(torch.clamp(-1.5 * body_angular_velocity[2], -0.5, 0.5).item())
+    half_track = 0.24
+    yaw_differential = half_track * yaw_rate * 4.0
+    left_velocity = -(forward + yaw_differential) / 0.09
+    right_velocity = -(forward - yaw_differential) / 0.09
+    brake = torch.tensor(
+        [[left_velocity, right_velocity, left_velocity, right_velocity]],
+        dtype=action.dtype,
+        device=action.device,
+    ).div_(5.0).clamp_(-2.5, 2.5)
+    action = action.clone()
+    action[:, 12:] = brake
+    return action
+
+
 def reset_scene(scene: InteractiveScene) -> None:
     robot = scene["robot"]
     robot.reset()
@@ -217,12 +245,16 @@ def main() -> None:
     checkpoint_config = payload.get("config", {})
     architecture = checkpoint_config.get("architecture", "global_v1")
     mask_privileged_command = bool(checkpoint_config.get("proprio_command_mask"))
-    model = M20VLAActionChunk(horizon, architecture=architecture)
+    stop_head = bool(checkpoint_config.get("stop_head", False))
+    model = M20VLAActionChunk(horizon, architecture=architecture, stop_head=stop_head)
     model.load_state_dict(payload["model_state_dict"])
-    device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
-    model.to(device).eval()
+    sim_device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
+    model_device = torch.device(
+        args.model_device if torch.cuda.is_available() or not args.model_device.startswith("cuda") else "cpu"
+    )
+    model.to(model_device).eval()
     args.video_dir.mkdir(parents=True, exist_ok=True)
-    sim = SimulationContext(SimulationCfg(dt=0.005, render_interval=4, device=str(device)))
+    sim = SimulationContext(SimulationCfg(dt=0.005, render_interval=4, device=str(sim_device)))
     scene = InteractiveScene(VLAReplaySceneCfg(num_envs=1, env_spacing=3.0, replicate_physics=True))
     sim.reset()
     scene.update(sim.get_physics_dt())
@@ -262,33 +294,103 @@ def main() -> None:
     video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
     if not video.isOpened():
         raise RuntimeError(f"Unable to open video writer: {video_path}")
-    language = encode_text(args.task_text).to(robot.device).unsqueeze(0)
+    language = encode_text(args.task_text).to(model_device).unsqueeze(0)
     cached_chunk = None
     cached_index = 0
+    stop_latched = False
+    stop_triggered_step = None
     try:
         for step in range(args.steps):
+            debug_started = time.perf_counter()
+            if step < args.debug_steps:
+                print(f"[M20PRO-VLA-TIMING] step={step} stage=begin", flush=True)
             if cached_chunk is None or cached_index >= min(args.chunk_execution, horizon):
                 proprio = make_proprio(robot, joint_ids, last_action, mask_privileged_command)
                 front_image = rgb_small(front)
                 rear_image = rgb_small(rear)
-                rgb = torch.cat((front_image, rear_image), dim=-1).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).to(device)
-                scan = lidar_scan(lidar).unsqueeze(0).to(device)
-                with torch.inference_mode():
-                    cached_chunk = model(rgb, scan, proprio.to(device), language)
+                rgb = torch.cat((front_image, rear_image), dim=-1).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).to(model_device)
+                scan = lidar_scan(lidar).unsqueeze(0).to(model_device)
+                cached_index = 0
+            if step < args.debug_steps:
+                print(
+                    f"[M20PRO-VLA-TIMING] step={step} stage=sensors elapsed={time.perf_counter() - debug_started:.3f}s",
+                    flush=True,
+                )
+            with torch.inference_mode():
+                model_output = model(rgb, scan, proprio.to(model_device), language, return_stop=stop_head)
+                if stop_head:
+                    cached_chunk, stop_logit = model_output
+                    stop_probability = float(torch.sigmoid(stop_logit[0]).item())
+                    if stop_probability >= args.stop_threshold:
+                        stop_latched = True
+                        if stop_triggered_step is None:
+                            stop_triggered_step = step
+                else:
+                    cached_chunk = model_output
+                    stop_probability = None
+            if step < args.debug_steps:
+                print(
+                    f"[M20PRO-VLA-TIMING] step={step} stage=inference elapsed={time.perf_counter() - debug_started:.3f}s",
+                    flush=True,
+                )
+            if args.debug_first_action and step == 0:
+                print(
+                    f"[M20PRO-VLA-DEBUG] proprio={proprio[0, :9].detach().cpu().numpy().round(5).tolist()} "
+                    f"rgb_mean={rgb.mean().item():.5f} lidar_mean={scan.mean().item():.5f} "
+                    f"chunk0={cached_chunk[0, 0].detach().cpu().numpy().round(5).tolist()}",
+                    flush=True,
+                )
                 cached_index = 0
             action = cached_chunk[:, cached_index].clamp(-4.0, 4.0).to(robot.device)
             cached_index += 1
+            if stop_latched:
+                action.zero_()
+                action = apply_stop_brake(robot, action)
+                robot.actuators["wheels"].damping.fill_(args.stop_wheel_damping)
             robot.set_joint_position_target(default_pose[:, :12] + action[:, :12] * leg_scale, joint_ids=leg_ids)
             robot.set_joint_velocity_target(action[:, 12:] * WHEEL_SCALE, joint_ids=wheel_ids)
             last_action = action
+            # Move the inspection camera before stepping so the rendered
+            # frame uses the pose for this control interval.  Setting it
+            # after the step leaves one stale frame from the camera's spawn
+            # pose (inside the MJCF root), which makes the replay misleading.
+            camera_target = robot.data.root_pos_w + torch.tensor([[0.0, 0.0, 0.1]], device=robot.device)
+            camera_eye = camera_target + torch.tensor([[-1.4, 1.4, 0.85]], device=robot.device)
+            if step < args.debug_steps:
+                print(
+                    f"[M20PRO-VLA-TIMING] step={step} stage=camera_begin elapsed={time.perf_counter() - debug_started:.3f}s",
+                    flush=True,
+                )
+            third.set_world_poses_from_view(camera_eye, camera_target)
+            if step < args.debug_steps:
+                print(
+                    f"[M20PRO-VLA-TIMING] step={step} stage=camera_end elapsed={time.perf_counter() - debug_started:.3f}s",
+                    flush=True,
+                )
             for _ in range(4):
+                if step < args.debug_steps and _ == 0:
+                    print(
+                        f"[M20PRO-VLA-TIMING] step={step} stage=sim_begin elapsed={time.perf_counter() - debug_started:.3f}s",
+                        flush=True,
+                    )
                 scene.write_data_to_sim()
+                # SimulationCfg.render_interval already renders every fourth
+                # physics step.  Explicit False/True toggling here can
+                # deadlock the next CUDA model inference in headless mode.
                 sim.step()
                 scene.update(sim.get_physics_dt())
-            target = robot.data.root_pos_w + torch.tensor([[0.0, 0.0, 0.1]], device=robot.device)
-            third.set_world_poses_from_view(target + torch.tensor([[-1.4, 1.4, 0.85]], device=robot.device), target)
+            if step < args.debug_steps:
+                print(
+                    f"[M20PRO-VLA-TIMING] step={step} stage=simulation elapsed={time.perf_counter() - debug_started:.3f}s",
+                    flush=True,
+                )
             frame = third.data.output["rgb"][0, ..., :3].detach().cpu().numpy().astype(np.uint8)
             video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            if step < args.debug_steps:
+                print(
+                    f"[M20PRO-VLA-TIMING] step={step} stage=video elapsed={time.perf_counter() - debug_started:.3f}s",
+                    flush=True,
+                )
             height = float(robot.data.root_pos_w[0, 2].item())
             min_height, max_height = min(min_height, height), max(max_height, height)
             forward_speed_sum += float(robot.data.root_lin_vel_b[0, 0].item())
@@ -340,6 +442,9 @@ def main() -> None:
         "max_root_height": max_height,
         "terminated_steps": terminated_steps,
         "mean_abs_action": action_sum / args.steps,
+        "stop_head": stop_head,
+        "stop_threshold": args.stop_threshold if stop_head else None,
+        "stop_triggered_step": stop_triggered_step,
         "target_reached": target_reached,
         "target_reached_step": target_reached_step,
         "min_target_distance": None if args.target_color == "none" else min_target_distance,

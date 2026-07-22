@@ -35,6 +35,11 @@ parser.add_argument("--command-yaw", type=float, default=0.0)
 parser.add_argument("--initial-height", type=float, default=0.54)
 parser.add_argument("--wheel-damping", type=float, default=None, help="Isaac-only wheel Kd override; default adapts for yaw commands.")
 parser.add_argument(
+    "--mirror-negative-yaw",
+    action="store_true",
+    help="Mirror the public positive-yaw expert for negative yaw commands using M20 left-right symmetry.",
+)
+parser.add_argument(
     "--segment",
     action="append",
     default=[],
@@ -121,6 +126,10 @@ POLICY_JOINT_NAMES = [
     "hl_wheel_joint",
     "hr_wheel_joint",
 ]
+MIRROR_PERM = torch.tensor([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8, 13, 12, 15, 14], dtype=torch.long)
+MIRROR_SIGN = torch.tensor([-1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+MIRROR_ANGULAR_VELOCITY = torch.tensor([-1.0, 1.0, -1.0])
+MIRROR_POLAR_VECTOR = torch.tensor([1.0, -1.0, 1.0])
 DEFAULT_POLICY_POSE = torch.tensor(
     [
         0.0,
@@ -221,6 +230,7 @@ def make_observation(
     policy_joint_ids: list[int],
     last_action: torch.Tensor,
     command_values: tuple[float, float, float],
+    mirror: bool = False,
 ) -> torch.Tensor:
     gravity_w = torch.tensor([[0.0, 0.0, -1.0]], device=robot.device)
     projected_gravity = quat_apply_inverse(robot.data.root_quat_w, gravity_w)
@@ -237,9 +247,20 @@ def make_observation(
         [robot.data.root_ang_vel_b * 0.25, projected_gravity, command, joint_pos, joint_vel, last_action],
         dim=-1,
     )
+    if mirror:
+        observation[:, 0:3] *= MIRROR_ANGULAR_VELOCITY.to(robot.device)
+        observation[:, 3:6] *= MIRROR_POLAR_VECTOR.to(robot.device)
+        observation[:, 9:25] = observation[:, 9:25][:, MIRROR_PERM.to(robot.device)] * MIRROR_SIGN.to(robot.device)
+        observation[:, 25:41] = observation[:, 25:41][:, MIRROR_PERM.to(robot.device)] * MIRROR_SIGN.to(robot.device)
+        observation[:, 41:57] = observation[:, 41:57][:, MIRROR_PERM.to(robot.device)] * MIRROR_SIGN.to(robot.device)
     if observation.shape != (1, 57):
         raise RuntimeError(f"M20 observation shape mismatch: {tuple(observation.shape)}")
     return observation
+
+
+def mirror_action(action: torch.Tensor) -> torch.Tensor:
+    mirrored = action[:, MIRROR_PERM.to(action.device)] * MIRROR_SIGN.to(action.device)
+    return mirrored
 
 
 def yaw_from_quaternion(quat: torch.Tensor) -> float:
@@ -332,11 +353,15 @@ def main() -> None:
         for step in range(args.steps):
             command, damping = command_for_step(step)
             robot.actuators["wheels"].damping.fill_(damping)
-            observation = make_observation(robot, policy_joint_ids, last_action, command)
+            mirror = args.mirror_negative_yaw and command[2] < -1e-6
+            policy_command = (command[0], command[1], abs(command[2])) if mirror else command
+            observation = make_observation(robot, policy_joint_ids, last_action, policy_command, mirror=mirror)
             action_np = session.run(["actions"], {"obs": observation.detach().cpu().numpy()})[0]
             if action_np.shape != (1, 16) or not np.isfinite(action_np).all():
                 raise RuntimeError("M20 policy returned an invalid action")
             action = torch.from_numpy(action_np).to(device=robot.device, dtype=torch.float32)
+            if mirror:
+                action = mirror_action(action)
             leg_target = default_pose[:, :12] + action[:, :12] * leg_scale
             wheel_velocity_target = action[:, 12:] * WHEEL_ACTION_SCALE
             robot.set_joint_position_target(leg_target, joint_ids=leg_ids)
