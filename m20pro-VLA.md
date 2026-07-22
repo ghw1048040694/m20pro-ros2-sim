@@ -422,6 +422,7 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - v13 使用理论距离阈值 `0.16`（约 `0.8 m / 5 m`）时在 `1.1539 m` 误停；阈值降到 `0.10` 后不再触发 stop，但 command 回归头把前进速度降到接近零，最终仍停在 `1.1543 m`。因此不能把 v13 标记为成功；回放器现为尚未满足 learned stop 的 `forward` 技能设置 `0.08 m/s` 最小接近速度，待下一轮带视频复测。
 - 定位到此前全部 MP4 使用 OpenCV `mp4v`（MPEG-4 Part 2），文件本身完整但桌面播放器兼容性差。新增 [video_utils.py](scripts/video_utils.py) 和 [convert_videos_to_h264.py](scripts/convert_videos_to_h264.py)，所有 9 个录制/回放脚本在关闭视频后自动原子转为 `H.264/yuv420p + faststart`。
 - 2 TB 盘上的现有视频已批量转换：`49/49` 为 H.264、逐文件首帧解码失败数 `0`；`47` 个旧视频完成转换、`2` 个已是 H.264 而跳过，视频目录从约 `40 MB` 降到 `11 MB`。
+- 新录制链路另以 `videos/h264_writer_smoke_v1/` 完成 30 帧实测：输出为 `H.264/yuv420p`、`50 FPS`、`480x288`，首帧和末帧均可解码；桌面 `video/mp4` 默认关联已统一到 Microsoft Edge。
 
 ## 待办路线
 
