@@ -76,6 +76,7 @@ if args.target_stop_pos_weight <= 0.0:
 class Episode:
     path: Path
     task_text: str
+    dagger_skill: bool
     front: np.ndarray
     rear: np.ndarray
     lidar: np.ndarray
@@ -193,7 +194,21 @@ def load_episodes(dataset_dirs: list[Path]) -> list[Episode]:
                     raise ValueError(f"Length mismatch in {path}")
                 if len(command) == 0 or not all(np.isfinite(x).all() for x in (lidar, proprio, command)):
                     raise ValueError(f"Non-finite or empty episode: {path}")
-                episodes.append(Episode(path, task_text, front, rear, lidar, proprio, command, target_stop, target_distance, target_mask))
+                episodes.append(
+                    Episode(
+                        path,
+                        task_text,
+                        dagger_skill,
+                        front,
+                        rear,
+                        lidar,
+                        proprio,
+                        command,
+                        target_stop,
+                        target_distance,
+                        target_mask,
+                    )
+                )
     if not episodes:
         raise RuntimeError("No successful M20 expert episodes available")
     return episodes
@@ -336,11 +351,19 @@ def main() -> None:
     train_episodes: list[Episode] = []
     val_episodes: list[Episode] = []
     for group in grouped.values():
-        split_rng.shuffle(group)
-        val_count = max(1, int(round(len(group) * args.val_fraction))) if len(group) > 1 else 0
-        val_count = min(val_count, len(group) - 1)
-        val_episodes.extend(group[:val_count])
-        train_episodes.extend(group[val_count:])
+        # Online DAgger states were collected specifically for adaptation and
+        # must not consume the independent expert validation split.
+        dagger_group = [episode for episode in group if episode.dagger_skill]
+        expert_group = [episode for episode in group if not episode.dagger_skill]
+        split_rng.shuffle(expert_group)
+        val_count = (
+            max(1, int(round(len(expert_group) * args.val_fraction)))
+            if len(expert_group) > 1
+            else 0
+        )
+        val_count = min(val_count, len(expert_group) - 1)
+        val_episodes.extend(expert_group[:val_count])
+        train_episodes.extend(expert_group[val_count:] + dagger_group)
     train_set = FrameDataset(train_episodes, args.stride)
     val_set = FrameDataset(val_episodes, args.stride) if val_episodes else None
     if not train_set:
