@@ -25,10 +25,13 @@ for episode_id in "$@"; do
     continue
   fi
 
-  if "${SCRIPT_DIR}/audit_m20_smolvla_data.sh" 2>&1 | tee -a "${log_path}"; then
-    echo "[M20PRO-BATCH] audit completed after ${episode_id}"
+  audit_path="${LOG_DIR}/${episode_id}.audit.json"
+  if "${SCRIPT_DIR}/audit_m20_smolvla_data.sh" >"${audit_path}" 2>&1; then
+    echo "[M20PRO-BATCH] audit completed after ${episode_id}; report=${audit_path}"
+    rg '"(annotated_scenes|smolvla_candidate_episodes|smolvla_eligible_episodes|ready_for_visible_objectnav_finetune|ready_for_smolvla_finetune)"' "${audit_path}" || true
   else
-    echo "[M20PRO-BATCH] audit command failed after ${episode_id}" >&2
+    cat "${audit_path}" >>"${log_path}"
+    echo "[M20PRO-BATCH] audit command failed after ${episode_id}; report=${audit_path}" >&2
     failed+=("${episode_id}:audit")
   fi
 done
