@@ -39,6 +39,7 @@ exec "${SCRIPT_DIR}/record_public_m20_expert.sh" \
   --nav-forward-speed 0.45 \
   --nav-wheel-acceleration 12.0 \
   --stop-yaw-brake-gain 0.0 \
+  --stop-pretrigger-radius 0.0 \
   --stop-speed-threshold 0.15 \
   --stop-confirm-steps 5 \
   --target-hold-steps 100 \

@@ -74,6 +74,12 @@ parser.add_argument(
 )
 parser.add_argument("--stop-brake-gain", type=float, default=2.0, help="Proportional body-forward braking gain after reaching a target.")
 parser.add_argument("--stop-yaw-brake-gain", type=float, default=1.5, help="Proportional yaw braking gain after reaching a target.")
+parser.add_argument(
+    "--stop-pretrigger-radius",
+    type=float,
+    default=0.0,
+    help="Begin velocity-based wheel braking before success radius; zero disables pre-braking.",
+)
 parser.add_argument("--stop-speed-threshold", type=float, default=0.08)
 parser.add_argument("--stop-confirm-steps", type=int, default=10)
 parser.add_argument("--target-hold-steps", type=int, default=100)
@@ -91,6 +97,12 @@ parser.add_argument(
     action=argparse.BooleanOptionalAction,
     default=None,
     help="Use a PhysX velocity drive for wheel targets (default: enabled for indoor scenes).",
+)
+parser.add_argument(
+    "--implicit-wheel-damping",
+    type=float,
+    default=4.0,
+    help="Velocity-drive damping for indoor implicit wheel actuators.",
 )
 parser.add_argument("--episode-offset", type=int, default=0, help="First output episode index for appending scenario runs.")
 parser.add_argument("--wheel-damping", type=float, default=None, help="Isaac-only wheel Kd override; default adapts for yaw commands.")
@@ -187,8 +199,14 @@ if not 0.0 < args.nav_min_distance_scale <= 1.0:
     parser.error("--nav-min-distance-scale must be in (0, 1]")
 if args.nav_wheel_acceleration <= 0.0 or args.nav_wheel_yaw_gain <= 0.0 or args.stop_wheel_damping <= 0.0:
     parser.error("--nav-wheel-acceleration, --nav-wheel-yaw-gain and --stop-wheel-damping must be positive")
+if args.implicit_wheel_damping <= 0.0:
+    parser.error("--implicit-wheel-damping must be positive")
 if args.stop_brake_gain < 0.0 or args.stop_yaw_brake_gain < 0.0:
     parser.error("--stop-brake-gain and --stop-yaw-brake-gain must be non-negative")
+if args.stop_pretrigger_radius < 0.0:
+    parser.error("--stop-pretrigger-radius must be non-negative")
+if args.stop_pretrigger_radius > 0.0 and args.stop_pretrigger_radius < args.success_radius:
+    parser.error("--stop-pretrigger-radius must be zero or at least --success-radius")
 if args.stop_speed_threshold <= 0.0 or args.stop_confirm_steps <= 0 or args.target_hold_steps <= 0:
     parser.error("stop speed, confirmation and target hold settings must be positive")
 if args.fall_height_threshold <= 0.0:
@@ -272,7 +290,7 @@ WHEEL_ACTUATOR_CFG = (
         effort_limit_sim=21.6,
         velocity_limit_sim=79.3,
         stiffness=0.0,
-        damping=4.0,
+        damping=args.implicit_wheel_damping,
         armature=0.02,
     )
     if args.implicit_wheel_actuator
@@ -755,6 +773,7 @@ def main() -> None:
         "navigate_to_target": args.navigate_to_target, "override_navigation_wheels": args.override_navigation_wheels,
         "target_color": args.target_color,
         "target_xy": [args.target_x, args.target_y], "wheel_damping": WHEEL_DAMPING,
+        "implicit_wheel_damping": args.implicit_wheel_damping,
         "wheel_actuator": (
             "physx_implicit_velocity_drive"
             if args.implicit_wheel_actuator
@@ -783,10 +802,12 @@ def main() -> None:
             "min_distance_scale": args.nav_min_distance_scale,
             "wheel_acceleration": args.nav_wheel_acceleration, "wheel_yaw_gain": args.nav_wheel_yaw_gain,
             "stop_wheel_damping": args.stop_wheel_damping, "turn_wheel_damping": TURN_WHEEL_DAMPING,
+            "implicit_wheel_damping": args.implicit_wheel_damping,
             "wheel_radius": args.wheel_radius,
             "track_width": args.track_width,
             "stop_brake_gain": args.stop_brake_gain,
             "stop_yaw_brake_gain": args.stop_yaw_brake_gain,
+            "stop_pretrigger_radius": args.stop_pretrigger_radius,
             "stop_speed_threshold": args.stop_speed_threshold,
             "stop_confirm_steps": args.stop_confirm_steps,
             "target_hold_steps": args.target_hold_steps,
@@ -937,6 +958,7 @@ def main() -> None:
             h5.attrs["initial_yaw_deg"] = episode_initial_yaw_deg
             h5.attrs["random_seed"] = args.seed
             h5.attrs["wheel_damping"] = WHEEL_DAMPING
+            h5.attrs["implicit_wheel_damping"] = args.implicit_wheel_damping
             h5.attrs["wheel_actuator"] = metadata["wheel_actuator"]
             h5.attrs["fall_height_threshold"] = args.fall_height_threshold
             h5.attrs["expert"] = metadata["expert"]
@@ -958,12 +980,20 @@ def main() -> None:
             h5.attrs["dagger_skill_expert_probability"] = args.dagger_skill_expert_probability
             for step in range(args.steps):
                 target_in_range = False
+                pretrigger_active = False
                 if TARGET_PRESENT:
                     target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
-                    target_in_range = bool(torch.linalg.vector_norm(target_delta).item() <= args.success_radius)
+                    target_distance_now = float(torch.linalg.vector_norm(target_delta).item())
+                    target_in_range = target_distance_now <= args.success_radius
                     if target_in_range and not target_reached:
                         target_reached = True
                         target_reached_step = step
+                    pretrigger_active = bool(
+                        args.navigate_to_target
+                        and not target_reached
+                        and args.stop_pretrigger_radius > 0.0
+                        and target_distance_now <= args.stop_pretrigger_radius
+                    )
                 if args.navigate_to_target:
                     if args.nav_fixed_turn_steps > 0 and step < args.nav_fixed_turn_steps and not target_reached:
                         cached_navigation_command = (0.0, 0.0, target_turn_sign * args.nav_max_yaw)
@@ -1105,7 +1135,8 @@ def main() -> None:
                     if dagger_skill_model is None or expert_intervention
                     else learner_command
                 )
-                set_navigation_wheel_damping(robot, execution_command, target_reached)
+                wheel_stop_mode = target_reached or pretrigger_active
+                set_navigation_wheel_damping(robot, execution_command, wheel_stop_mode)
                 planar_speed = float(
                     torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item()
                 )
@@ -1127,7 +1158,7 @@ def main() -> None:
                 )
                 if stop_now:
                     expert_action = torch.zeros((1, 16), device=robot.device)
-                elif args.navigate_to_target and target_reached and args.override_navigation_wheels:
+                elif args.navigate_to_target and wheel_stop_mode and args.override_navigation_wheels:
                     expert_action = override_navigation_wheels(
                         torch.zeros((1, 16), device=robot.device),
                         target_stop_command(robot),
@@ -1140,7 +1171,7 @@ def main() -> None:
                         joint_ids,
                         policy_last_action,
                         expert_command,
-                        target_reached,
+                        wheel_stop_mode,
                     )
                 execution_action = expert_action
                 if vla_action is not None:
@@ -1154,7 +1185,7 @@ def main() -> None:
                         joint_ids,
                         policy_last_action,
                         learner_command,
-                        target_reached,
+                        wheel_stop_mode,
                     )
                 if stop_now:
                     # Do not let the learner reintroduce motion after the
@@ -1198,7 +1229,7 @@ def main() -> None:
                         expert_command[0],
                         expert_command[1],
                         expert_command[2],
-                        float(stop_now or target_reached),
+                        float(stop_now or target_reached or pretrigger_active),
                         0.0,
                         0.0,
                     ],
@@ -1273,6 +1304,7 @@ def main() -> None:
             h5.attrs["target_reached_step"] = -1 if target_reached_step is None else target_reached_step
             h5.attrs["stop_latched"] = stop_latched
             h5.attrs["stop_latched_step"] = -1 if stop_latched_step is None else stop_latched_step
+            h5.attrs["stop_pretrigger_radius"] = args.stop_pretrigger_radius
             h5.attrs["max_post_stop_target_hold_steps"] = max_post_stop_target_hold_steps
             h5.attrs["min_target_distance"] = min_target_distance if TARGET_PRESENT else -1.0
             h5.attrs["final_target_distance"] = -1.0 if final_target_distance is None else final_target_distance
