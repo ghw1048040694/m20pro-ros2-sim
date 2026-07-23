@@ -28,6 +28,7 @@ REQUIRED_DATASETS = (
     "observation/state",
     "terminated",
 )
+V2_PROPRIO_DATASET = "observation/smolvla_proprio"
 HOLDOUT_MARKERS = ("eval", "holdout", "test")
 
 
@@ -107,6 +108,15 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
             result["errors"].append("rgb_not_uint8")
         if front.shape[1:] != rear.shape[1:] or len(front.shape) != 4 or front.shape[-1] != 3:
             result["errors"].append("invalid_rgb_shape")
+
+        state_schema_valid = (
+            V2_PROPRIO_DATASET in h5
+            and tuple(h5[V2_PROPRIO_DATASET].shape) == (frame_count, 8)
+            and np.isfinite(np.asarray(h5[V2_PROPRIO_DATASET], dtype=np.float32)).all()
+            and str(attrs.get("smolvla_state_schema", "")).startswith("body_linear_velocity_3")
+        )
+        if smolvla_candidate and not state_schema_valid:
+            result["errors"].append("missing_invariant_smolvla_state_v2")
 
         lidar = np.nan_to_num(
             lidar,
@@ -199,6 +209,7 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 result["errors"].append("candidate_uses_privileged_target_pose_at_inference")
 
         target_visibility_valid = True
+        stop_visibility_valid = True
         if smolvla_candidate and str(attrs.get("task_type")) == "visible_object_navigation":
             target_visibility_valid = (
                 "observation/front_target_pixel_fraction" in h5
@@ -221,6 +232,24 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 )
             if not target_visibility_valid:
                 result["errors"].append("visible_target_not_verified_in_camera")
+            if target_visibility_valid and high_level_action_valid:
+                front_fraction = np.asarray(
+                    h5["observation/front_target_pixel_fraction"], dtype=np.float32
+                )
+                rear_fraction = np.asarray(
+                    h5["observation/rear_target_pixel_fraction"], dtype=np.float32
+                )
+                visibility = np.maximum(front_fraction, rear_fraction)
+                stop_mask = np.asarray(h5["high_level_action"], dtype=np.float32)[:, 3] > 0.5
+                stop_indices = np.flatnonzero(stop_mask)
+                first_stop = int(stop_indices[0]) if len(stop_indices) else -1
+                stop_visibility_valid = bool(
+                    first_stop > 0
+                    and visibility[first_stop] > 1.0e-4
+                    and np.max(visibility[max(0, first_stop - 4) : first_stop + 1]) > 1.0e-4
+                )
+                if not stop_visibility_valid:
+                    result["errors"].append("stop_label_begins_after_target_leaves_camera")
 
         temporal_alignment_valid = (
             explicit_timestamps and sensor_alignment == "pre_action"
@@ -255,6 +284,8 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 "split": split,
                 "task_type": attrs.get("task_type"),
                 "target_visibility_valid": target_visibility_valid,
+                "stop_visibility_valid": stop_visibility_valid,
+                "smolvla_state_schema_valid": state_schema_valid,
                 "target_reached": bool(attrs.get("target_reached", False)),
                 "scene_id": attrs.get("scene_id"),
                 "obstacle_height_m": attrs.get("obstacle_height_m"),
@@ -282,7 +313,25 @@ def main() -> None:
     paths = sorted(args.input_root.rglob("*.h5"))
     if not paths:
         raise FileNotFoundError(f"No HDF5 episodes found under {args.input_root}")
-    episodes = [inspect_episode(path, args.input_root, args) for path in paths]
+    episodes = []
+    for path in paths:
+        try:
+            episodes.append(inspect_episode(path, args.input_root, args))
+        except (OSError, ValueError) as exc:
+            # A recorder killed during Kit startup can leave a truncated HDF5.
+            # Keep the audit report usable and make the corruption explicit.
+            episodes.append(
+                {
+                    "path": str(path.relative_to(args.input_root)),
+                    "errors": [f"unreadable_hdf5:{type(exc).__name__}:{exc}"],
+                    "warnings": [],
+                    "smolvla_candidate": False,
+                    "smolvla_eligible": False,
+                    "train_eligible": False,
+                    "success": False,
+                    "frames": 0,
+                }
+            )
     eligible = [episode for episode in episodes if episode.get("train_eligible", False)]
     candidates = [episode for episode in episodes if episode.get("smolvla_candidate", False)]
     smolvla_eligible = [
@@ -371,7 +420,7 @@ def main() -> None:
     }
     gates = {**visible_objectnav_gates, **downstream_gates}
     summary = {
-        "schema": "m20pro_smolvla_data_audit_v1",
+        "schema": "m20pro_smolvla_data_audit_v2",
         "input_root": str(args.input_root),
         "inventory": {
             "episodes": len(episodes),

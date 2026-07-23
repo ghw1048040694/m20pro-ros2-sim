@@ -188,8 +188,19 @@ def build_manifest(seed: int = 20260723) -> dict:
                     "scene_id": scenes[scene_index]["id"],
                     "object_category": objects[object_index]["id"],
                     "instruction_template_id": templates[template_index]["id"],
-                    "target_slot_id": "visible_a" if index % 2 == 0 else "visible_b",
-                    "start_slot_id": "start_a" if index % 3 else "start_b",
+                    # Training starts face visible_a. Keeping the target slot
+                    # aligned with that heading makes the camera visibility
+                    # claim physically testable instead of manifest-only.
+                    "target_slot_id": (
+                        "visible_a"
+                        if split == "train"
+                        else ("visible_a" if index % 2 == 0 else "visible_b")
+                    ),
+                    "start_slot_id": (
+                        "start_a"
+                        if split == "train"
+                        else ("start_a" if index % 3 else "start_b")
+                    ),
                     "seed": seed + index + 10000 * split_offsets[split],
                 }
             )

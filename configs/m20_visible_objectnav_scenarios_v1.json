@@ -2789,7 +2789,7 @@
       "object_category": "master_chef_can",
       "instruction_template_id": "zh_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260723
     },
     {
@@ -2798,7 +2798,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "master_chef_can",
       "instruction_template_id": "zh_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260724
     },
@@ -2818,8 +2818,8 @@
       "scene_id": "indoor_train_03",
       "object_category": "master_chef_can",
       "instruction_template_id": "zh_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260726
     },
     {
@@ -2838,7 +2838,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "master_chef_can",
       "instruction_template_id": "zh_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260728
     },
@@ -2849,7 +2849,7 @@
       "object_category": "master_chef_can",
       "instruction_template_id": "zh_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260729
     },
     {
@@ -2858,7 +2858,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "master_chef_can",
       "instruction_template_id": "zh_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260730
     },
@@ -2878,8 +2878,8 @@
       "scene_id": "indoor_train_01",
       "object_category": "cracker_box",
       "instruction_template_id": "zh_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260732
     },
     {
@@ -2898,7 +2898,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "cracker_box",
       "instruction_template_id": "zh_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260734
     },
@@ -2909,7 +2909,7 @@
       "object_category": "cracker_box",
       "instruction_template_id": "en_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260735
     },
     {
@@ -2918,7 +2918,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "cracker_box",
       "instruction_template_id": "en_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260736
     },
@@ -2938,8 +2938,8 @@
       "scene_id": "indoor_train_07",
       "object_category": "cracker_box",
       "instruction_template_id": "en_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260738
     },
     {
@@ -2958,7 +2958,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "sugar_box",
       "instruction_template_id": "en_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260740
     },
@@ -2969,7 +2969,7 @@
       "object_category": "sugar_box",
       "instruction_template_id": "en_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260741
     },
     {
@@ -2978,7 +2978,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "sugar_box",
       "instruction_template_id": "en_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260742
     },
@@ -2998,8 +2998,8 @@
       "scene_id": "indoor_train_05",
       "object_category": "sugar_box",
       "instruction_template_id": "en_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260744
     },
     {
@@ -3018,7 +3018,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "sugar_box",
       "instruction_template_id": "en_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260746
     },
@@ -3029,7 +3029,7 @@
       "object_category": "tomato_soup_can",
       "instruction_template_id": "zh_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260747
     },
     {
@@ -3038,7 +3038,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "tomato_soup_can",
       "instruction_template_id": "zh_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260748
     },
@@ -3058,8 +3058,8 @@
       "scene_id": "indoor_train_03",
       "object_category": "tomato_soup_can",
       "instruction_template_id": "zh_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260750
     },
     {
@@ -3078,7 +3078,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "tomato_soup_can",
       "instruction_template_id": "zh_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260752
     },
@@ -3089,7 +3089,7 @@
       "object_category": "tomato_soup_can",
       "instruction_template_id": "zh_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260753
     },
     {
@@ -3098,7 +3098,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "tomato_soup_can",
       "instruction_template_id": "zh_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260754
     },
@@ -3118,8 +3118,8 @@
       "scene_id": "indoor_train_01",
       "object_category": "mustard_bottle",
       "instruction_template_id": "zh_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260756
     },
     {
@@ -3138,7 +3138,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "mustard_bottle",
       "instruction_template_id": "zh_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260758
     },
@@ -3149,7 +3149,7 @@
       "object_category": "mustard_bottle",
       "instruction_template_id": "en_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260759
     },
     {
@@ -3158,7 +3158,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "mustard_bottle",
       "instruction_template_id": "en_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260760
     },
@@ -3178,8 +3178,8 @@
       "scene_id": "indoor_train_07",
       "object_category": "mustard_bottle",
       "instruction_template_id": "en_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260762
     },
     {
@@ -3198,7 +3198,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "tuna_fish_can",
       "instruction_template_id": "en_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260764
     },
@@ -3209,7 +3209,7 @@
       "object_category": "tuna_fish_can",
       "instruction_template_id": "en_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260765
     },
     {
@@ -3218,7 +3218,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "tuna_fish_can",
       "instruction_template_id": "en_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260766
     },
@@ -3238,8 +3238,8 @@
       "scene_id": "indoor_train_05",
       "object_category": "tuna_fish_can",
       "instruction_template_id": "en_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260768
     },
     {
@@ -3258,7 +3258,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "tuna_fish_can",
       "instruction_template_id": "en_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260770
     },
@@ -3269,7 +3269,7 @@
       "object_category": "pudding_box",
       "instruction_template_id": "zh_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260771
     },
     {
@@ -3278,7 +3278,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "pudding_box",
       "instruction_template_id": "zh_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260772
     },
@@ -3298,8 +3298,8 @@
       "scene_id": "indoor_train_03",
       "object_category": "pudding_box",
       "instruction_template_id": "zh_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260774
     },
     {
@@ -3318,7 +3318,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "pudding_box",
       "instruction_template_id": "zh_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260776
     },
@@ -3329,7 +3329,7 @@
       "object_category": "pudding_box",
       "instruction_template_id": "zh_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260777
     },
     {
@@ -3338,7 +3338,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "pudding_box",
       "instruction_template_id": "zh_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260778
     },
@@ -3358,8 +3358,8 @@
       "scene_id": "indoor_train_01",
       "object_category": "gelatin_box",
       "instruction_template_id": "zh_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260780
     },
     {
@@ -3378,7 +3378,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "gelatin_box",
       "instruction_template_id": "zh_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260782
     },
@@ -3389,7 +3389,7 @@
       "object_category": "gelatin_box",
       "instruction_template_id": "en_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260783
     },
     {
@@ -3398,7 +3398,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "gelatin_box",
       "instruction_template_id": "en_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260784
     },
@@ -3418,8 +3418,8 @@
       "scene_id": "indoor_train_07",
       "object_category": "gelatin_box",
       "instruction_template_id": "en_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260786
     },
     {
@@ -3438,7 +3438,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "potted_meat_can",
       "instruction_template_id": "en_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260788
     },
@@ -3449,7 +3449,7 @@
       "object_category": "potted_meat_can",
       "instruction_template_id": "en_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260789
     },
     {
@@ -3458,7 +3458,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "potted_meat_can",
       "instruction_template_id": "en_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260790
     },
@@ -3478,8 +3478,8 @@
       "scene_id": "indoor_train_05",
       "object_category": "potted_meat_can",
       "instruction_template_id": "en_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260792
     },
     {
@@ -3498,7 +3498,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "potted_meat_can",
       "instruction_template_id": "en_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260794
     },
@@ -3509,7 +3509,7 @@
       "object_category": "banana",
       "instruction_template_id": "zh_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260795
     },
     {
@@ -3518,7 +3518,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "banana",
       "instruction_template_id": "zh_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260796
     },
@@ -3538,8 +3538,8 @@
       "scene_id": "indoor_train_03",
       "object_category": "banana",
       "instruction_template_id": "zh_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260798
     },
     {
@@ -3558,7 +3558,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "banana",
       "instruction_template_id": "zh_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260800
     },
@@ -3569,7 +3569,7 @@
       "object_category": "banana",
       "instruction_template_id": "zh_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260801
     },
     {
@@ -3578,7 +3578,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "banana",
       "instruction_template_id": "zh_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260802
     },
@@ -3598,8 +3598,8 @@
       "scene_id": "indoor_train_01",
       "object_category": "pitcher",
       "instruction_template_id": "zh_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260804
     },
     {
@@ -3618,7 +3618,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "pitcher",
       "instruction_template_id": "zh_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260806
     },
@@ -3629,7 +3629,7 @@
       "object_category": "pitcher",
       "instruction_template_id": "en_00",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260807
     },
     {
@@ -3638,7 +3638,7 @@
       "scene_id": "indoor_train_05",
       "object_category": "pitcher",
       "instruction_template_id": "en_01",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260808
     },
@@ -3658,8 +3658,8 @@
       "scene_id": "indoor_train_07",
       "object_category": "pitcher",
       "instruction_template_id": "en_03",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260810
     },
     {
@@ -3678,7 +3678,7 @@
       "scene_id": "indoor_train_01",
       "object_category": "bleach_cleanser",
       "instruction_template_id": "en_05",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260812
     },
@@ -3689,7 +3689,7 @@
       "object_category": "bleach_cleanser",
       "instruction_template_id": "en_06",
       "target_slot_id": "visible_a",
-      "start_slot_id": "start_b",
+      "start_slot_id": "start_a",
       "seed": 20260813
     },
     {
@@ -3698,7 +3698,7 @@
       "scene_id": "indoor_train_03",
       "object_category": "bleach_cleanser",
       "instruction_template_id": "en_07",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260814
     },
@@ -3718,8 +3718,8 @@
       "scene_id": "indoor_train_05",
       "object_category": "bleach_cleanser",
       "instruction_template_id": "en_09",
-      "target_slot_id": "visible_b",
-      "start_slot_id": "start_b",
+      "target_slot_id": "visible_a",
+      "start_slot_id": "start_a",
       "seed": 20260816
     },
     {
@@ -3738,7 +3738,7 @@
       "scene_id": "indoor_train_07",
       "object_category": "bleach_cleanser",
       "instruction_template_id": "en_11",
-      "target_slot_id": "visible_b",
+      "target_slot_id": "visible_a",
       "start_slot_id": "start_a",
       "seed": 20260818
     },

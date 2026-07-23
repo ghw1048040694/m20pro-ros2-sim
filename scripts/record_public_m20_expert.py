@@ -123,6 +123,18 @@ parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT / "da
 parser.add_argument("--video-dir", type=Path, default=DEFAULT_OUTPUT_ROOT / "videos/public_m20_native_v1")
 parser.add_argument("--image-width", type=int, default=160)
 parser.add_argument("--image-height", type=int, default=96)
+parser.add_argument(
+    "--camera-pitch-deg",
+    type=float,
+    default=22.0,
+    help="Pitch front/rear cameras down so a low object remains visible during approach.",
+)
+parser.add_argument(
+    "--camera-focal-length",
+    type=float,
+    default=18.0,
+    help="Pinhole focal length in mm; lower values widen the ObjectNav field of view.",
+)
 parser.add_argument("--video", action="store_true", help="Required: write one MP4 per episode.")
 parser.add_argument("--dagger-checkpoint", type=Path, default=None, help="Optional VLA checkpoint used for mixed DAgger rollouts.")
 parser.add_argument("--dagger-alpha", type=float, default=0.75, help="Fraction of the public expert action used during a DAgger rollout.")
@@ -132,6 +144,26 @@ parser.add_argument("--dagger-skill-min-forward", type=float, default=0.08)
 parser.add_argument("--dagger-skill-max-forward", type=float, default=0.35)
 parser.add_argument("--dagger-skill-max-yaw", type=float, default=0.5)
 parser.add_argument("--dagger-model-device", default="cpu", help="Device for the optional DAgger VLA model.")
+parser.add_argument(
+    "--smolvla-checkpoint",
+    type=Path,
+    default=None,
+    help="Run the trained SmolVLA high-level policy in learner-only mode.",
+)
+parser.add_argument(
+    "--smolvla-dataset-root",
+    type=Path,
+    default=DATA_ROOT / "datasets/m20_visible_objectnav_lerobot_v2",
+)
+parser.add_argument("--smolvla-model-device", default="cuda")
+parser.add_argument(
+    "--smolvla-action-hold-steps",
+    type=int,
+    default=10,
+    help="Hold each SmolVLA command for this many 50 Hz control frames.",
+)
+parser.add_argument("--smolvla-stop-threshold", type=float, default=1.10)
+parser.add_argument("--smolvla-stop-confirm-steps", type=int, default=5)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 INDOOR_SELECTION = None
@@ -211,6 +243,10 @@ if args.stop_speed_threshold <= 0.0 or args.stop_confirm_steps <= 0 or args.targ
     parser.error("stop speed, confirmation and target hold settings must be positive")
 if args.fall_height_threshold <= 0.0:
     parser.error("--fall-height-threshold must be positive")
+if not -60.0 <= args.camera_pitch_deg <= 60.0:
+    parser.error("--camera-pitch-deg must be between -60 and 60 degrees")
+if args.camera_focal_length <= 0.0:
+    parser.error("--camera-focal-length must be positive")
 if not args.policy.is_file():
     parser.error(f"M20 policy not found: {args.policy}")
 if args.dagger_checkpoint is not None and not args.dagger_checkpoint.is_file():
@@ -219,6 +255,16 @@ if args.dagger_skill_checkpoint is not None and not args.dagger_skill_checkpoint
     parser.error(f"Skill DAgger checkpoint not found: {args.dagger_skill_checkpoint}")
 if args.dagger_checkpoint is not None and args.dagger_skill_checkpoint is not None:
     parser.error("Use either --dagger-checkpoint or --dagger-skill-checkpoint, not both")
+if args.smolvla_checkpoint is not None and (
+    args.dagger_checkpoint is not None or args.dagger_skill_checkpoint is not None
+):
+    parser.error("--smolvla-checkpoint cannot be combined with DAgger checkpoints")
+if args.smolvla_checkpoint is not None and not args.smolvla_checkpoint.is_dir():
+    parser.error(f"SmolVLA checkpoint directory not found: {args.smolvla_checkpoint}")
+if args.smolvla_action_hold_steps <= 0 or args.smolvla_stop_confirm_steps <= 0:
+    parser.error("SmolVLA hold and stop confirmation steps must be positive")
+if args.smolvla_stop_threshold <= 0.0:
+    parser.error("--smolvla-stop-threshold must be positive")
 if args.dagger_skill_checkpoint is not None and not args.navigate_to_target:
     parser.error("--dagger-skill-checkpoint requires --navigate-to-target for expert command labels")
 if not 0.0 <= args.dagger_alpha <= 1.0:
@@ -250,6 +296,12 @@ from m20_vla_skill_model import (  # noqa: E402
     SKILL_NAMES,
     M20VLASkillPolicy,
 )
+if args.smolvla_checkpoint is not None:  # noqa: E402
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset  # noqa: E402
+    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy  # noqa: E402
+    from lerobot.policies.smolvla.processor_smolvla import (  # noqa: E402
+        make_smolvla_pre_post_processors,
+    )
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg  # noqa: E402
@@ -379,6 +431,20 @@ def lidar_cfg() -> RayCasterCfg:
     )
 
 
+def camera_pitch_quaternion(pitch_deg: float, yaw_deg: float = 0.0) -> tuple[float, float, float, float]:
+    """Return an Isaac (w, x, y, z) yaw-then-pitch quaternion."""
+    yaw = np.deg2rad(yaw_deg) * 0.5
+    pitch = np.deg2rad(pitch_deg) * 0.5
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    return (
+        float(cy * cp),
+        float(-sy * sp),
+        float(cy * sp),
+        float(sy * cp),
+    )
+
+
 @configclass
 class NativeM20SceneCfg(InteractiveSceneCfg):
     terrain = TerrainImporterCfg(
@@ -398,9 +464,13 @@ class NativeM20SceneCfg(InteractiveSceneCfg):
         ),
         semantic_filter="class:target",
         semantic_segmentation_mapping={"class:target": (255, 0, 255, 255)},
-        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955,
+        spawn=sim_utils.PinholeCameraCfg(focal_length=args.camera_focal_length, focus_distance=400.0, horizontal_aperture=20.955,
                                          clipping_range=(0.05, 100.0)),
-        offset=CameraCfg.OffsetCfg(pos=(0.38, 0.0, 0.12), convention="world"),
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.38, 0.0, 0.12),
+            rot=camera_pitch_quaternion(args.camera_pitch_deg),
+            convention="world",
+        ),
     )
     rear_camera = CameraCfg(
         prim_path=f"{{ENV_REGEX_NS}}/Robot/{SENSOR_LINK}/rear_camera", update_period=0.02,
@@ -413,11 +483,11 @@ class NativeM20SceneCfg(InteractiveSceneCfg):
         ),
         semantic_filter="class:target",
         semantic_segmentation_mapping={"class:target": (255, 0, 255, 255)},
-        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955,
+        spawn=sim_utils.PinholeCameraCfg(focal_length=args.camera_focal_length, focus_distance=400.0, horizontal_aperture=20.955,
                                          clipping_range=(0.05, 100.0)),
         offset=CameraCfg.OffsetCfg(
             pos=(-0.38, 0.0, 0.12),
-            rot=(0.0, 0.0, 0.0, 1.0),
+            rot=camera_pitch_quaternion(args.camera_pitch_deg, 180.0),
             convention="world",
         ),
     )
@@ -582,6 +652,44 @@ def scan(lidar, max_distance: float = 20.0) -> np.ndarray:
     return torch.nan_to_num(values, nan=max_distance, posinf=max_distance, neginf=0.0).clamp(0.0, max_distance).cpu().numpy().astype(np.float32)
 
 
+def smolvla_state(proprio_observation: np.ndarray, lidar_observation: np.ndarray) -> np.ndarray:
+    """Match the 8 invariant proprio + 24 LiDAR-sector state used in v2."""
+    lidar = np.asarray(lidar_observation, dtype=np.float32)
+    if lidar.size != 72:
+        raise ValueError(f"SmolVLA expects 72 LiDAR beams, got {lidar.shape}")
+    sectors = np.nan_to_num(lidar, nan=20.0, posinf=20.0, neginf=0.0).reshape(24, 3)
+    proprio = np.asarray(proprio_observation, dtype=np.float32)
+    if proprio.shape != (8,):
+        raise ValueError(f"SmolVLA expects 8 invariant proprio values, got {proprio.shape}")
+    result = np.concatenate((proprio, sectors.min(axis=1)))
+    if result.shape != (32,) or not np.isfinite(result).all():
+        raise ValueError(f"Invalid SmolVLA state shape/value: {result.shape}")
+    return result.astype(np.float32, copy=False)
+
+
+def smolvla_body_proprio(robot: Articulation) -> np.ndarray:
+    """Return body-frame velocity and gravity, excluding absolute world pose."""
+    gravity = torch.tensor([[0.0, 0.0, -1.0]], device=robot.device)
+    body_linear_velocity = quat_apply_inverse(
+        robot.data.root_quat_w, robot.data.root_lin_vel_w
+    )[0]
+    body_angular_velocity = quat_apply_inverse(
+        robot.data.root_quat_w, robot.data.root_ang_vel_w
+    )[0]
+    projected_gravity = quat_apply_inverse(robot.data.root_quat_w, gravity)[0, :2]
+    values = torch.cat(
+        (
+            body_linear_velocity,
+            body_angular_velocity,
+            projected_gravity,
+        )
+    )
+    result = values.detach().cpu().numpy().astype(np.float32)
+    if result.shape != (8,) or not np.isfinite(result).all():
+        raise ValueError(f"Invalid invariant proprioception: {result.shape}")
+    return result
+
+
 def encode_text(text: str, max_length: int = 32) -> torch.Tensor:
     values = np.frombuffer(text.encode("utf-8")[:max_length], dtype=np.uint8).astype(np.int64) + 1
     tokens = np.zeros(max_length, dtype=np.int64)
@@ -695,6 +803,9 @@ def main() -> None:
         raise RuntimeError("Native M20 policy is not the expected 57->16 model")
     dagger_model = None
     dagger_skill_model = None
+    smolvla_model = None
+    smolvla_preprocessor = None
+    smolvla_postprocessor = None
     dagger_device = torch.device(
         args.dagger_model_device
         if torch.cuda.is_available() or not args.dagger_model_device.startswith("cuda")
@@ -726,6 +837,24 @@ def main() -> None:
         )
         dagger_skill_model.load_state_dict(payload["model_state_dict"])
         dagger_skill_model.to(dagger_device).eval()
+    if args.smolvla_checkpoint is not None:
+        smolvla_device = (
+            args.smolvla_model_device
+            if torch.cuda.is_available() or not args.smolvla_model_device.startswith("cuda")
+            else "cpu"
+        )
+        smolvla_config = SmolVLAPolicy.from_pretrained(
+            args.smolvla_checkpoint, device=smolvla_device
+        )
+        smolvla_model = smolvla_config
+        smol_dataset = LeRobotDataset(
+            "m20pro_visible_objectnav_v2",
+            root=args.smolvla_dataset_root,
+            download_videos=False,
+        )
+        smolvla_preprocessor, smolvla_postprocessor = make_smolvla_pre_post_processors(
+            smolvla_model.config, smol_dataset.meta.stats
+        )
     sim = SimulationContext(SimulationCfg(dt=0.005, render_interval=4, device=args.device or "cuda:0"))
     spawn_indoor_geometry()
     scene = InteractiveScene(NativeM20SceneCfg(num_envs=1, env_spacing=3.0, replicate_physics=True))
@@ -794,6 +923,13 @@ def main() -> None:
             None if args.dagger_skill_checkpoint is None else str(args.dagger_skill_checkpoint)
         ),
         "dagger_skill_expert_probability": args.dagger_skill_expert_probability,
+        "smolvla_checkpoint": (
+            None if args.smolvla_checkpoint is None else str(args.smolvla_checkpoint)
+        ),
+        "smolvla_learner_only": args.smolvla_checkpoint is not None,
+        "smolvla_action_hold_steps": args.smolvla_action_hold_steps,
+        "smolvla_stop_threshold": args.smolvla_stop_threshold,
+        "smolvla_stop_confirm_steps": args.smolvla_stop_confirm_steps,
         "navigation": {
             "forward_speed": args.nav_forward_speed, "heading_gain": args.nav_heading_gain,
             "max_yaw": args.nav_max_yaw, "turn_threshold": args.nav_turn_threshold,
@@ -875,8 +1011,13 @@ def main() -> None:
             if INDOOR_SELECTION is not None
             else f"episode_{episode_id:04d}"
         )
-        path = args.output_dir / f"{episode_stem}.h5"
-        video_path = args.video_dir / f"{episode_stem}.mp4"
+        final_path = args.output_dir / f"{episode_stem}.h5"
+        final_video_path = args.video_dir / f"{episode_stem}.mp4"
+        # Keep incomplete recorder output visibly separate from finalized
+        # episodes. A killed Kit process can then be retried without treating
+        # a truncated file as a valid demonstration.
+        path = args.output_dir / f".{episode_stem}.part.h5"
+        video_path = args.video_dir / f".{episode_stem}.part.mp4"
         video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
         if not video.isOpened():
             raise RuntimeError(f"Unable to open video writer: {video_path}")
@@ -892,6 +1033,13 @@ def main() -> None:
         target_reached_step = None
         stop_latched = False
         stop_latched_step = None
+        stop_triggered_step = None
+        smolvla_stop_latched = False
+        smolvla_stop_latched_step = None
+        smolvla_stop_streak = 0
+        smolvla_cached_command = (0.0, 0.0, 0.0)
+        smolvla_cached_action = np.zeros(6, dtype=np.float32)
+        smolvla_inference_count = 0
         low_speed_streak = 0
         post_stop_target_hold_streak = 0
         max_post_stop_target_hold_steps = 0
@@ -928,6 +1076,9 @@ def main() -> None:
             )
             lidar_ds = obs.create_dataset("lidar", (args.steps, ray_count), dtype="f4", compression="lzf")
             proprio_ds = obs.create_dataset("proprio", (args.steps, 57), dtype="f4", compression="lzf")
+            smolvla_proprio_ds = obs.create_dataset(
+                "smolvla_proprio", (args.steps, 8), dtype="f4", compression="lzf"
+            )
             state_ds = obs.create_dataset("state", (args.steps, 45), dtype="f4", compression="lzf")
             action_ds = h5.create_dataset("action", (args.steps, 16), dtype="f4", compression="lzf")
             command_ds = h5.create_dataset("expert_command", (args.steps, 3), dtype="f4", compression="lzf")
@@ -965,6 +1116,11 @@ def main() -> None:
             h5.attrs["asset_usd_path"] = metadata["asset_usd_path"]
             h5.attrs["control_hz"] = metadata["control_hz"]
             h5.attrs["sensor_alignment"] = metadata["sensor_alignment"]
+            h5.attrs["smolvla_state_schema"] = (
+                "body_linear_velocity_3,body_angular_velocity_3,projected_gravity_xy_2,lidar_sector_min_24"
+            )
+            h5.attrs["camera_pitch_deg"] = args.camera_pitch_deg
+            h5.attrs["camera_focal_length"] = args.camera_focal_length
             h5.attrs["lidar_mesh_scope"] = metadata["lidar_mesh_scope"]
             h5.attrs["smolvla_candidate"] = metadata["smolvla_candidate"]
             h5.attrs["high_level_action_schema"] = json.dumps(
@@ -1028,6 +1184,7 @@ def main() -> None:
                     rear_target_fraction,
                 )
                 lidar_observation = scan(lidar)
+                smolvla_proprio = smolvla_body_proprio(robot)
                 state_observation = torch.cat(
                     (
                         robot.data.root_pos_w[0],
@@ -1057,7 +1214,50 @@ def main() -> None:
                 learner_command = expert_command
                 learner_skill = "stop" if target_reached else "forward"
                 expert_intervention = False
-                if dagger_model is not None:
+                if smolvla_model is not None:
+                    if step % args.smolvla_action_hold_steps == 0:
+                        smol_state = smolvla_state(smolvla_proprio, lidar_observation)
+                        smol_raw = {
+                            "observation.state": torch.from_numpy(smol_state),
+                            "observation.images.camera1": torch.from_numpy(
+                                front_observation
+                            ).permute(2, 0, 1).float().div_(255.0),
+                            "observation.images.camera2": torch.from_numpy(
+                                rear_observation
+                            ).permute(2, 0, 1).float().div_(255.0),
+                            "task": args.task_text,
+                        }
+                        smol_batch = smolvla_preprocessor(smol_raw)
+                        with torch.inference_mode():
+                            smol_prediction = smolvla_postprocessor(
+                                smolvla_model.select_action(smol_batch)
+                            )
+                        smolvla_cached_action = (
+                            smol_prediction.detach().cpu().numpy().reshape(-1).astype(np.float32)
+                        )
+                        smolvla_cached_action = np.nan_to_num(
+                            smolvla_cached_action, nan=0.0, posinf=0.0, neginf=0.0
+                        )
+                        smolvla_cached_command = (
+                            float(np.clip(smolvla_cached_action[0], -args.nav_forward_speed, args.nav_forward_speed)),
+                            float(np.clip(smolvla_cached_action[1], -args.nav_forward_speed, args.nav_forward_speed)),
+                            float(np.clip(smolvla_cached_action[2], -args.nav_max_yaw, args.nav_max_yaw)),
+                        )
+                        smolvla_inference_count += 1
+                        if float(smolvla_cached_action[3]) >= args.smolvla_stop_threshold:
+                            smolvla_stop_streak += 1
+                        else:
+                            smolvla_stop_streak = 0
+                        if (
+                            smolvla_stop_streak >= args.smolvla_stop_confirm_steps
+                            and not smolvla_stop_latched
+                        ):
+                            smolvla_stop_latched = True
+                            smolvla_stop_latched_step = step
+                            stop_triggered_step = step
+                    learner_command = smolvla_cached_command
+                    learner_skill = "stop" if smolvla_stop_latched else "forward"
+                elif dagger_model is not None:
                     vla_observation = native_observation(
                         robot, joint_ids, dagger_last_action, expert_command, mirror=False
                     )
@@ -1131,16 +1331,29 @@ def main() -> None:
                     stochastic_intervention_steps += int(stochastic_intervention)
                     forced_stop_intervention_steps += int(forced_stop_intervention)
                 execution_command = (
-                    expert_command
-                    if dagger_skill_model is None or expert_intervention
-                    else learner_command
+                    learner_command
+                    if smolvla_model is not None
+                    else (
+                        expert_command
+                        if dagger_skill_model is None or expert_intervention
+                        else learner_command
+                    )
                 )
-                wheel_stop_mode = target_reached or pretrigger_active
+                # Pre-trigger is a high-level stop label only. Switching the
+                # wheel target before the measured success radius destabilizes
+                # the released M20 locomotion policy, so physical braking is
+                # enabled only after target_reached becomes true.
+                wheel_stop_mode = target_reached
                 set_navigation_wheel_damping(robot, execution_command, wheel_stop_mode)
                 planar_speed = float(
                     torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item()
                 )
-                if args.navigate_to_target and target_reached and not stop_latched:
+                if (
+                    smolvla_model is None
+                    and args.navigate_to_target
+                    and target_reached
+                    and not stop_latched
+                ):
                     if planar_speed <= args.stop_speed_threshold:
                         low_speed_streak += 1
                     else:
@@ -1148,13 +1361,19 @@ def main() -> None:
                     if low_speed_streak >= args.stop_confirm_steps:
                         stop_latched = True
                         stop_latched_step = step
+                        stop_triggered_step = step
                 # Keep the native leg stabilizer active at the target. The
                 # wheel override applies a bounded reverse command based on
                 # measured body velocity, which dissipates inertia without
                 # replacing the learned posture controller.
                 stop_now = (
                     (args.stop_after is not None and step >= args.stop_after)
-                    or (args.stop_on_target and stop_latched)
+                    or (
+                        args.stop_on_target
+                        and stop_latched
+                        and smolvla_model is None
+                    )
+                    or smolvla_stop_latched
                 )
                 if stop_now:
                     expert_action = torch.zeros((1, 16), device=robot.device)
@@ -1170,8 +1389,8 @@ def main() -> None:
                         robot,
                         joint_ids,
                         policy_last_action,
-                        expert_command,
-                        wheel_stop_mode,
+                        (learner_command if smolvla_model is not None else expert_command),
+                        False if smolvla_model is not None else wheel_stop_mode,
                     )
                 execution_action = expert_action
                 if vla_action is not None:
@@ -1221,20 +1440,24 @@ def main() -> None:
                     state_observation,
                     expert_action[0].cpu().numpy(),
                 )
+                smolvla_proprio_ds[step] = smolvla_proprio
                 command_ds[step] = np.asarray(expert_command, dtype=np.float32)
                 front_target_fraction_ds[step] = front_target_fraction
                 rear_target_fraction_ds[step] = rear_target_fraction
-                high_level_action_ds[step] = np.asarray(
-                    [
-                        expert_command[0],
-                        expert_command[1],
-                        expert_command[2],
-                        float(stop_now or target_reached or pretrigger_active),
-                        0.0,
-                        0.0,
-                    ],
-                    dtype=np.float32,
-                )
+                if smolvla_model is not None:
+                    high_level_action_ds[step] = smolvla_cached_action
+                else:
+                    high_level_action_ds[step] = np.asarray(
+                        [
+                            expert_command[0],
+                            expert_command[1],
+                            expert_command[2],
+                            float(stop_now or target_reached or pretrigger_active),
+                            0.0,
+                            0.0,
+                        ],
+                        dtype=np.float32,
+                    )
                 timestamp_ds[step] = step / metadata["control_hz"]
                 frame_index_ds[step] = step
                 if learner_command_ds is not None and expert_intervention_ds is not None:
@@ -1252,13 +1475,16 @@ def main() -> None:
                     if target_distance <= args.success_radius and not target_reached:
                         target_reached = True
                         target_reached_step = step
-                    if stop_latched and target_distance <= args.success_radius:
+                    effective_stop_latched = (
+                        smolvla_stop_latched if smolvla_model is not None else stop_latched
+                    )
+                    if effective_stop_latched and target_distance <= args.success_radius:
                         post_stop_target_hold_streak += 1
                         max_post_stop_target_hold_steps = max(
                             max_post_stop_target_hold_steps,
                             post_stop_target_hold_streak,
                         )
-                    elif stop_latched:
+                    elif effective_stop_latched:
                         post_stop_target_hold_streak = 0
                 gravity_z = float(quat_apply_inverse(robot.data.root_quat_w, torch.tensor([[0.0, 0.0, -1.0]], device=robot.device))[0, 2].item())
                 terminated = int(
@@ -1281,10 +1507,13 @@ def main() -> None:
             )
             final_planar_speed = float(torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item())
             if args.navigate_to_target:
+                effective_stop_latched = (
+                    smolvla_stop_latched if smolvla_model is not None else stop_latched
+                )
                 command_ok = (
                     target_reached and final_target_distance is not None
                     and final_target_distance <= args.success_radius + 0.1 and final_planar_speed < 0.15
-                    and stop_latched
+                    and effective_stop_latched
                     and max_post_stop_target_hold_steps >= args.target_hold_steps
                 )
             elif abs(args.command_x) >= 0.05:
@@ -1304,6 +1533,11 @@ def main() -> None:
             h5.attrs["target_reached_step"] = -1 if target_reached_step is None else target_reached_step
             h5.attrs["stop_latched"] = stop_latched
             h5.attrs["stop_latched_step"] = -1 if stop_latched_step is None else stop_latched_step
+            h5.attrs["smolvla_stop_latched"] = smolvla_stop_latched
+            h5.attrs["smolvla_stop_latched_step"] = (
+                -1 if smolvla_stop_latched_step is None else smolvla_stop_latched_step
+            )
+            h5.attrs["smolvla_inference_count"] = smolvla_inference_count
             h5.attrs["stop_pretrigger_radius"] = args.stop_pretrigger_radius
             h5.attrs["max_post_stop_target_hold_steps"] = max_post_stop_target_hold_steps
             h5.attrs["min_target_distance"] = min_target_distance if TARGET_PRESENT else -1.0
@@ -1321,6 +1555,10 @@ def main() -> None:
                 sort_keys=True,
             )
         finalize_h264_video(video, video_path)
+        os.replace(video_path, final_video_path)
+        os.replace(path, final_path)
+        path = final_path
+        video_path = final_video_path
         displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
         stable = terminated_steps == 0 and min_height >= args.fall_height_threshold
         final_target_distance = (
@@ -1331,10 +1569,13 @@ def main() -> None:
         )
         final_planar_speed = float(torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item())
         if args.navigate_to_target:
+            effective_stop_latched = (
+                smolvla_stop_latched if smolvla_model is not None else stop_latched
+            )
             command_ok = (
                 target_reached and final_target_distance is not None
                 and final_target_distance <= args.success_radius + 0.1 and final_planar_speed < 0.15
-                and stop_latched
+                and effective_stop_latched
                 and max_post_stop_target_hold_steps >= args.target_hold_steps
             )
         elif abs(args.command_x) >= 0.05:
@@ -1362,6 +1603,12 @@ def main() -> None:
             "target_reached_step": target_reached_step,
             "stop_latched": stop_latched,
             "stop_latched_step": stop_latched_step,
+            "smolvla_checkpoint": (
+                None if args.smolvla_checkpoint is None else str(args.smolvla_checkpoint)
+            ),
+            "smolvla_stop_latched": smolvla_stop_latched,
+            "smolvla_stop_latched_step": smolvla_stop_latched_step,
+            "smolvla_inference_count": smolvla_inference_count,
             "max_post_stop_target_hold_steps": max_post_stop_target_hold_steps,
             "target_hold_steps_required": args.target_hold_steps,
             "min_target_distance_m": (

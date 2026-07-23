@@ -23,8 +23,9 @@ case "${EPISODE_ID}" in
     ;;
 esac
 
-OUTPUT_DIR="${DATA_ROOT}/datasets/m20_visible_objectnav_v1/${SPLIT}"
-VIDEO_DIR="${DATA_ROOT}/videos/m20_visible_objectnav_v1/${SPLIT}"
+DATASET_VERSION="${M20PRO_OBJECTNAV_DATASET_VERSION:-v2}"
+OUTPUT_DIR="${DATA_ROOT}/datasets/m20_visible_objectnav_${DATASET_VERSION}/${SPLIT}"
+VIDEO_DIR="${DATA_ROOT}/videos/m20_visible_objectnav_${DATASET_VERSION}/${SPLIT}"
 if [[ -e "${OUTPUT_DIR}/episode_${EPISODE_ID}.h5" && "${M20PRO_OVERWRITE:-0}" != "1" ]]; then
   echo "Episode already exists; set M20PRO_OVERWRITE=1 to replace it: ${EPISODE_ID}" >&2
   exit 3
@@ -39,7 +40,7 @@ exec "${SCRIPT_DIR}/record_public_m20_expert.sh" \
   --nav-forward-speed 0.45 \
   --nav-wheel-acceleration 12.0 \
   --stop-yaw-brake-gain 0.0 \
-  --stop-pretrigger-radius 0.0 \
+  --stop-pretrigger-radius 1.20 \
   --stop-speed-threshold 0.15 \
   --stop-confirm-steps 5 \
   --target-hold-steps 100 \

@@ -3,7 +3,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_ROOT="${M20PRO_VLA_DATA_ROOT:-/media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA}"
-LOG_DIR="${M20PRO_BATCH_LOG_DIR:-${DATA_ROOT}/logs/m20_visible_objectnav_batch}"
+DATASET_VERSION="${M20PRO_OBJECTNAV_DATASET_VERSION:-v2}"
+LOG_DIR="${M20PRO_BATCH_LOG_DIR:-${DATA_ROOT}/logs/m20_visible_objectnav_${DATASET_VERSION}_batch}"
+LOCK_DIR="${DATA_ROOT}/locks"
+LOCK_PATH="${LOCK_DIR}/m20_visible_objectnav_${DATASET_VERSION}.lock"
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 train_0001 train_0002 ..." >&2
@@ -12,6 +15,12 @@ if [[ $# -lt 1 ]]; then
 fi
 
 mkdir -p "${LOG_DIR}"
+mkdir -p "${LOCK_DIR}"
+exec 9>"${LOCK_PATH}"
+if ! flock -n 9; then
+  echo "[M20PRO-BATCH] another ${DATASET_VERSION} collection is already running: ${LOCK_PATH}" >&2
+  exit 4
+fi
 failed=()
 
 for episode_id in "$@"; do
@@ -26,7 +35,10 @@ for episode_id in "$@"; do
   fi
 
   audit_path="${LOG_DIR}/${episode_id}.audit.json"
-  if "${SCRIPT_DIR}/audit_m20_smolvla_data.sh" >"${audit_path}" 2>&1; then
+  if "${SCRIPT_DIR}/audit_m20_smolvla_data.sh" \
+      --input-root "${DATA_ROOT}/datasets/m20_visible_objectnav_${DATASET_VERSION}" \
+      --output "${DATA_ROOT}/logs/m20_smolvla_data_audit_${DATASET_VERSION}.json" \
+      >"${audit_path}" 2>&1; then
     echo "[M20PRO-BATCH] audit completed after ${episode_id}; report=${audit_path}"
     rg '"(annotated_scenes|smolvla_candidate_episodes|smolvla_eligible_episodes|ready_for_visible_objectnav_finetune|ready_for_smolvla_finetune)"' "${audit_path}" || true
   else
