@@ -140,5 +140,16 @@ VLA 主线。新的高层策略使用官方 `lerobot/smolvla_base`（固定 revi
 ```
 
 审计未通过时不启动 SmolVLA 微调。
+可见目标 ObjectNav 的随机室内场景清单与正式采集入口为：
+
+```bash
+python3 scripts/build_m20_objectnav_manifest.py
+./scripts/collect_m20_visible_objectnav.sh train_0000
+./scripts/audit_m20_smolvla_data.sh
+```
+
+清单将训练/验证/测试场景和指令模板隔离，墙体、家具和 YCB
+目标网格均进入 MultiMesh LiDAR。每条轨迹包含统一动作前时间戳、6 维
+高层动作、目标实际可见像素验证、JSON 指标和 H.264 视频。
 多房间、未见物体、隐藏目标搜索和 1 m 障碍的验收定义位于
 `configs/m20pro_vla_eval_v1.yaml`，必须以闭环成功率和逐 episode H.264 视频验收。

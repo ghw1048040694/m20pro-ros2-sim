@@ -491,6 +491,25 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - [record_public_m20_expert.py](scripts/record_public_m20_expert.py) 已将 45 维 `state` 移到动作前采样，新增 `timestamp/frame_index`，并写入 `sensor_alignment=pre_action` 和 `lidar_mesh_scope=ground_only`。旧数据保持原样，新采集才能通过对齐门。
 - 当前审计的 `7/7` 数据门均未通过，`ready_for_smolvla_finetune=false`。因此暂停“直接转换旧轨迹并微调”，先构建真正的随机室内场景、障碍可见 LiDAR 和成功专家数据。
 
+### 室内 visible ObjectNav 数据链路 v1（2026-07-23）
+
+- 新增 [m20_visible_objectnav_scenarios_v1.json](configs/m20_visible_objectnav_scenarios_v1.json) 和可重建脚本 [build_m20_objectnav_manifest.py](scripts/build_m20_objectnav_manifest.py)。清单 SHA-256 为 `0fefbb32de9650cdc62fd699a896f614404c4d3d542edaedacbc50f05c264a74`，包含 `8` 个训练布局、`2` 个验证布局、`2` 个可见目标测试布局、`12` 类 NVIDIA Isaac Sim YCB 物体和 `48` 个中英指令模板。其中训练/验证/测试模板分别为 `24/12/12`，集合互不重叠；共有 `156` 个确定性 episode 定义。
+- 室内采集器从单地面 `RayCaster` 切换为 Isaac Lab `MultiMeshRayCaster`。smoke 日志确认它实际读取了地面 `2` 个 mesh、房间墙体/家具 `7` 个 mesh 以及 YCB 目标 `1` 个 `8006` 顶点/`16384` 面的 mesh。正式样本的 LiDAR 距离范围为 `2.21-5.89 m`，非最大量程返回比例 `1.0`，不再是射线打地面造成的伪障碍证据。
+- 修正了历史采集器的后相机朝向：旧配置只把相机移到机身后方，却没有旋转 `180 deg`，因此前后两帧实际同向。新配置下首帧目标像素占比为前相机 `0.03483`、后相机 `0.0`，语义分割已确认目标确实在前视野，不再只相信 manifest 的声明。
+- 每帧新增 `high_level_action[6] = [forward, lateral, yaw, stop, search, parkour]`、目标可见像素比例、统一动作前 `timestamp/frame_index`；HDF5 同时保存 `scene_id/split/object_category/object_source/object_usd_path/instruction_template_id/manifest_sha256`。物理目标位姿只供示范专家标注，HDF5 明确写入 `inference_uses_privileged_target_pose=false`。
+- 室内低层执行器保留公开 M20 ONNX 的腿部稳定输出，四轮改用 PhysX implicit velocity drive。这是专家数据生成的低层执行，不是 VLA 结果；转换前实测的显式 DC motor 轮速会在零命令下达到约 `+/-50 rad/s`，是早期停车后飘移/跌倒的直接原因。
+- pilot v1-v5 都保留为失败证据：原生轮输出在到达后跌倒；高停车阻尼会振荡；只置零会稳定但漂移；闭环制动在旧执行器上会发散。换用隐式速度驱动并修正航向反馈后，pilot v6 首次严格成功。
+- 正式 `train_0000` 数据已通过：第 `120` 帧进入 `0.8 m` 半径，第 `132` 帧完成低速确认并锁定停车，半径内连续保持 `188` 帧，最小/最终距离 `0.7534/0.7876 m`，最终平面速度 `0.0341 m/s`，路径长 `3.0174 m`，最低根高 `0.4372 m`，`terminated_steps=0`。`320/320` 帧视频为 H.264 High/yuv420p/50 FPS，已完整解码。
+- 正式采集命令为 `./scripts/collect_m20_visible_objectnav.sh train_0000`；它默认拒绝覆盖已有 episode。正式 HDF5/JSON 位于 `datasets/m20_visible_objectnav_v1/train/`，视频位于 `videos/m20_visible_objectnav_v1/train/`。
+- 主审计现为 `31` 条/`14,290` 帧，其中新规范 `smolvla_candidate=2`、`smolvla_eligible=2`。新数据的“候选数据全部时序对齐”、“场景几何进入 LiDAR”和“6 维动作完整”三项已通过；场景/物体/模板覆盖为 `2/8`、`2/12`、`2/24`，所以 `ready_for_visible_objectnav_finetune=false`，未开始 SmolVLA 微调。
+- `train_0009` 复测（第二个布局、第二类 YCB 物体、初始朝向 `-23.206 deg`）已严格通过：第 `158` 帧进入 `0.8 m` 半径，最终距离 `0.7796 m`，路径长 `2.8926 m`，最低根高 `0.4891 m`，`terminated_steps=0`，`success=true`；视频为 `320` 帧 H.264。该复测确认 `train_0000` 的专家参数不是单场景特例，但也暴露出当前工作仍只是“成功专家数据生成”，不是 VLA 学习结果。
+
+### 当前阶段判断与下一步（2026-07-23）
+
+- 用户对“长时间运行后只有一条展示视频”的不满意是合理的：当前还没有 SmolVLA 微调 checkpoint，也没有未见场景闭环成功率。两条规范样本只能验证采集链路和低层专家稳定性，不能作为任务完成证据。
+- 当前审计摘要：`31` 条 HDF5、`14,290` 帧；新规范候选 `2` 条且全部通过时序/数值审计；可见 ObjectNav 覆盖为场景 `2/8`、物体 `2/12`、模板 `2/24`；隐藏搜索成功 `0`，1 米障碍 LiDAR `0`，jump 标签 `0`。因此 `ready_for_visible_objectnav_finetune=false` 和 `ready_for_smolvla_finetune=false` 均保持不变。
+- 下一轮不再做单条手工展示，改为按 manifest 自动补齐训练覆盖。每完成一批就运行审计，只保留 `success=true`、视频可解码且候选门通过的 episode；覆盖达到 `8/12/24` 后再做 LeRobot v3 转换和 SmolVLA 微调。
+
 v14 绿色目标复现命令（显式无头并录制视频）：
 
 ```bash
@@ -507,8 +526,8 @@ python scripts/play_m20_vla_skill.py --headless --video \
 
 ## 待办路线
 
-1. 先建立至少 `8` 个随机室内场景、`12` 类真实物体和 `24` 个指令模板；墙体、家具和障碍必须进入 LiDAR mesh，采集器必须写入场景 ID、目标类别和统一动作前时间戳。
-2. 用成功专家在随机起点/朝向/目标位置上自动采集 visible ObjectNav，重跑 `./scripts/audit_m20_smolvla_data.sh`；只有 `ready_for_smolvla_finetune=true` 才进入 LeRobot v3 转换。
+1. 场景/物体/指令 manifest、MultiMesh LiDAR、同步 HDF5 和两个不同场景的严格成功 visible ObjectNav 已完成。
+2. 按 manifest 自动采集剩余训练覆盖，只保留 `success=true` 且通过数据审计的 episode；补齐 `8/12/24` 覆盖后，只在 `ready_for_visible_objectnav_finetune=true` 时进入 LeRobot v3 转换。
 3. 转换后审计前/后 RGB、LiDAR 派生视觉特征、6 维高层 action chunk、本体状态、自然语言、专家来源、时间戳和 train/validation/test 隔离，再以冻结视觉主干的单卡配置微调 SmolVLA。
 4. 第一个验收不看 loss：对未参与训练的场景、指令和目标位置运行至少 `20` 个 visible ObjectNav 闭环 episode，交付成功率、失败类型、aggregate JSON 和逐 episode H.264 视频。
 5. 然后加入目标位于侧后方、被遮挡和跨房间的成功轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。

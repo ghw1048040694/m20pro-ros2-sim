@@ -2,6 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/activate_smolvla_env.sh"
+source "${SCRIPT_DIR}/activate_vla_env.sh"
 
-exec "${M20PRO_SMOLVLA_PYTHON}" "${SCRIPT_DIR}/audit_m20_smolvla_data.py" "$@"
+exec python "${SCRIPT_DIR}/audit_m20_smolvla_data.py" "$@"

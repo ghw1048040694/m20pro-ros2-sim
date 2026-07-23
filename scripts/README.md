@@ -104,6 +104,22 @@ obstacle LiDAR, or jump data are missing:
 ./scripts/audit_m20_smolvla_data.sh
 ```
 
+Build the deterministic visible ObjectNav manifest and collect one selected
+episode. The manifest contains 8 training layouts, 12 YCB object categories,
+24 disjoint training instruction templates, plus separate validation and test
+layouts/templates. Collection is always headless and always writes H.264:
+
+```bash
+python3 scripts/build_m20_objectnav_manifest.py
+./scripts/collect_m20_visible_objectnav.sh train_0000
+./scripts/audit_m20_smolvla_data.sh
+```
+
+The indoor collector uses the public M20 ONNX expert for leg stabilization and
+a PhysX velocity drive for the four wheel targets. Privileged target pose is
+used only to label successful demonstrations; it is explicitly prohibited and
+recorded as disabled for VLA inference.
+
 Legacy PPO checkpoint files were removed during cleanup; their failure metrics
 remain in `m20pro-VLA.md`, but they are no longer a runnable storage target.
 
