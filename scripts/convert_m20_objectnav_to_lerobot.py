@@ -48,6 +48,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ROOT / "logs/m20_smolvla_data_audit_v2.json",
     )
     parser.add_argument("--max-episodes", type=int, default=0)
+    parser.add_argument(
+        "--stop-tail-frames",
+        type=int,
+        default=20,
+        help="Keep this many frames from the first stop label onward.",
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -83,6 +89,16 @@ def make_state(state: np.ndarray, lidar: np.ndarray) -> np.ndarray:
     return result
 
 
+def retained_frame_count(action: np.ndarray, stop_tail_frames: int) -> int:
+    """Trim long post-arrival tails while retaining a stable stop window."""
+    if stop_tail_frames < 0:
+        raise ValueError(f"stop_tail_frames must be non-negative, got {stop_tail_frames}")
+    stop_indices = np.flatnonzero(np.asarray(action)[:, 3] > 0.5)
+    if len(stop_indices) == 0:
+        return int(action.shape[0])
+    return min(int(action.shape[0]), int(stop_indices[0]) + stop_tail_frames)
+
+
 def eligible_paths(input_root: Path, audit_path: Path) -> list[Path]:
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     eligible = {
@@ -90,15 +106,24 @@ def eligible_paths(input_root: Path, audit_path: Path) -> list[Path]:
         for item in audit["episodes"]
         if item.get("smolvla_candidate") and item.get("smolvla_eligible")
     }
-    # Audit paths are relative to the audit input root. Support either the
-    # dataset root or its train/ subdirectory as the converter input.
+    # Audit paths are relative to the audit input root. Support audits made
+    # against either the dataset root or its train/ subdirectory, regardless
+    # of which of those two roots is supplied to this conversion.
     dataset_root = input_root.parent if input_root.name == "train" else input_root
-    paths = [dataset_root / relative for relative in eligible]
-    paths = sorted(
-        path
-        for path in paths
-        if path.exists() and (input_root.name != "train" or path.parent == input_root)
-    )
+    paths = []
+    for relative in sorted(eligible):
+        candidates = (input_root / relative, dataset_root / relative)
+        path = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.exists()
+                and (input_root.name != "train" or candidate.parent == input_root)
+            ),
+            None,
+        )
+        if path is not None:
+            paths.append(path)
     if not paths:
         raise RuntimeError("No audited SmolVLA-eligible episodes found")
     return paths
@@ -167,8 +192,9 @@ def convert(args: argparse.Namespace) -> dict:
                 smolvla_proprio = h5["observation/smolvla_proprio"]
                 if action.shape[1:] != (6,):
                     raise ValueError(f"{path}: high_level_action shape={action.shape}")
+                frame_count = retained_frame_count(action, args.stop_tail_frames)
                 task = str(attrs["task_text"])
-                for frame_index in range(action.shape[0]):
+                for frame_index in range(frame_count):
                     frame = {
                         "observation.state": make_state(
                             smolvla_proprio[frame_index], lidar[frame_index]
@@ -189,7 +215,8 @@ def convert(args: argparse.Namespace) -> dict:
                         "object_category": attrs.get("object_category"),
                         "instruction_template_id": attrs.get("instruction_template_id"),
                         "task_text": task,
-                        "frames": int(action.shape[0]),
+                        "source_frames": int(action.shape[0]),
+                        "frames": frame_count,
                     }
                 )
             print(f"[M20PRO-CONVERT] {episode_index + 1}/{len(paths)} {path.name}", flush=True)
@@ -202,6 +229,7 @@ def convert(args: argparse.Namespace) -> dict:
         "episodes": len(manifest),
         "frames": sum(item["frames"] for item in manifest),
         "fps": 50,
+        "stop_tail_frames": args.stop_tail_frames,
         "state": {
             "shape": [32],
             "proprio_indices": list(range(PROPRIO_DIM)),

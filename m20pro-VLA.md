@@ -1,6 +1,6 @@
 # M20 Pro VLA 具身智能仿真项目记录
 
-Last updated: 2026-07-23 CST
+Last updated: 2026-07-23 CST (21:32)
 
 ## 项目边界
 
@@ -537,13 +537,27 @@ python scripts/play_m20_vla_skill.py --headless --video \
 - 审计器升级为 `m20pro_smolvla_data_audit_v2`，现在会拒绝目标在 stop 起点不可见、缺少 invariant proprio 或不可读 HDF5 的样本；转换器已修复未定义 `PROPRIO_INDICES`，2 条 v2 smoke 已成功转换为 640 帧、32 维 state、6 维高层 action。
 - 当前 v2 有效训练样本为 `21` 条、`6,720` 帧，覆盖 `8/8` 个训练场景、`9/12` 类物体和 `20/24` 个指令模板；所有 21 条候选均通过时序对齐、LiDAR 几何和 6 维动作审计，尚未开始正式 SmolVLA 训练。
 
-### 当前状态快照（2026-07-23 20:38，中国标准时间）
+### 历史状态快照（2026-07-23 20:38，中国标准时间）
 
 - 单进程批量采集仍在运行：`train_0069` 正在 Isaac Sim headless 中采集；不要启动第二个 ObjectNav Kit 进程。
 - `train_0067`、`train_0068` 已完成并通过：均 `success=true`、`terminated_steps=0`，并生成可读 H.264 视频、HDF5 和 JSON 指标。`train_0067` 的最终目标距离为 `0.7497 m`，`train_0068` 为 `0.7473 m`。
 - 最近一次 v2 审计（`train_0068` 后）：总库存 `22` 条（其中 1 条为已归档损坏文件），有效候选 `21` 条、`6,720` 帧；场景覆盖 `8/8`，物体类别 `9/12`，指令模板 `20/24`。
 - 当前门禁：`ready_for_visible_objectnav_finetune=false`、`ready_for_smolvla_finetune=false`。尚未有 SmolVLA 微调 checkpoint，也没有把专家数据当作 VLA 成果。
 - 下一个可验证里程碑是补齐 `12/12` 物体和 `24/24` 指令模板后，执行正式 LeRobot 转换、从头微调 v2 SmolVLA，并用未见场景视频验收；隐藏搜索和 1 m 障碍跳跃仍是后续独立阶段。
+
+### SmolVLA trim20 首条真实闭环回放（2026-07-23 21:31）
+
+- 修正后的 LeRobot 数据已完成 `29` 条、`2831` 帧的 stop 尾段裁剪；stop 标签占比约 `20.49%`。`smolvla_objectnav_v2_trim20_1000/checkpoints/001000/pretrained_model` 已完成 `1000` steps 微调。
+- 独立离线审计通过：`mean_action_mae=0.0407`、`forward_mae=0.0453 m/s`、`yaw_mae=0.0326 rad/s`、`stop_accuracy=0.875`。这些指标只说明动作拟合，不是闭环成功率。
+- 首条 headless 闭环 `train_0000` 使用 `--smolvla-stop-threshold 0.4`、动作保持 `10` 步、stop 连续确认 `5` 次。结果：目标第 `91` 步进入半径，最小距离 `0.5944 m`，最终距离 `0.6858 m`，最低根高 `0.4912 m`，`terminated_steps=0`，但 `smolvla_stop_latched=false`、`command_ok=false`、`success=false`。机器人确实接近了目标，但没有停车，随后穿过目标区域。
+- 回放中的 stop 通道范围只有约 `0.000-0.194`，因此阈值 `0.4` 在该闭环状态分布中不可能触发。该现象与离线阈值扫描的 `0.35-0.45` 推荐区间不一致，说明存在训练集/闭环观测分布或 stop 标定偏移，不能继续把离线阈值当作闭环结论。
+- 视频位于 `videos/smolvla_objectnav_replay/train_0000/episode_train_0000.mp4`，已用 FFmpeg 完整解码通过；Isaac Sim 仅出现常规插件和 `torchcodec` fallback 警告，没有物理异常。
+
+### 当前阶段判断与下一步（更新）
+
+- 当前成果是“数据链路、SmolVLA 微调和低层运动稳定性已具备，首条视觉闭环尚未成功”，不能宣称完成 visible ObjectNav。
+- 立即任务改为记录至少 `5` 条闭环的完整 stop 预测曲线，并核对相同场景的训练帧与回放帧输入/归一化；只在不使用目标坐标的前提下重新标定 stop 阈值和确认逻辑。
+- stop 校准通过后，才汇总未见场景/目标的多 episode 成功率；隐藏物体主动搜索、place navigation 和 `1 m` 障碍跳跃仍未开始，当前门禁继续为 `false`。
 
 ## 待办路线
 

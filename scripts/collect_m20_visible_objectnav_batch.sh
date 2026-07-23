@@ -40,7 +40,13 @@ for episode_id in "$@"; do
       --output "${DATA_ROOT}/logs/m20_smolvla_data_audit_${DATASET_VERSION}.json" \
       >"${audit_path}" 2>&1; then
     echo "[M20PRO-BATCH] audit completed after ${episode_id}; report=${audit_path}"
-    rg '"(annotated_scenes|smolvla_candidate_episodes|smolvla_eligible_episodes|ready_for_visible_objectnav_finetune|ready_for_smolvla_finetune)"' "${audit_path}" || true
+    rg \
+      -e '"annotated_scenes"' \
+      -e '"smolvla_candidate_episodes"' \
+      -e '"smolvla_eligible_episodes"' \
+      -e '"ready_for_visible_objectnav_finetune"' \
+      -e '"ready_for_smolvla_finetune"' \
+      "${audit_path}" || true
   else
     cat "${audit_path}" >>"${log_path}"
     echo "[M20PRO-BATCH] audit command failed after ${episode_id}; report=${audit_path}" >&2

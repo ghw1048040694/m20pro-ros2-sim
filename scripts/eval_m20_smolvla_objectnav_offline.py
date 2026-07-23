@@ -72,6 +72,9 @@ def main() -> None:
         raw = dataset[sample_index]
         task = raw["task"]
         batch = preprocessor(raw)
+        # Each sampled frame is an independent query; do not reuse the
+        # previous 50-step action queue between unrelated observations.
+        policy.reset()
         with torch.no_grad():
             predicted = postprocessor(policy.select_action(batch))
         predictions.append(predicted.detach().cpu().numpy().reshape(-1))
