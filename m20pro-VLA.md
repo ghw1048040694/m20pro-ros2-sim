@@ -535,13 +535,13 @@ python scripts/play_m20_vla_skill.py --headless --video \
 - v2 pilot `train_0000` 严格通过：`success=true`、`terminated_steps=0`、第 71 帧 stop 标签起点目标像素 `26.2%`、目标最大可见比例 `43.5%`。单进程重采 `train_0001` 和 `train_0002` 也通过，后者第 100 帧到达、最终距离 `0.745 m`、最低根高 `0.472 m`。
 - 一次并发 Kit 运行损坏了 `train_0002` 的 HDF5/MP4；坏文件已移到 `datasets/m20_visible_objectnav_v2/corrupt_runs/20260723_concurrent_kit_train_0002/`，不进入审计或训练。后续批处理改为单进程。
 - 审计器升级为 `m20pro_smolvla_data_audit_v2`，现在会拒绝目标在 stop 起点不可见、缺少 invariant proprio 或不可读 HDF5 的样本；转换器已修复未定义 `PROPRIO_INDICES`，2 条 v2 smoke 已成功转换为 640 帧、32 维 state、6 维高层 action。
-- 当前 v2 有效训练样本为 `20` 条、`6,400` 帧，覆盖 `8/8` 个训练场景、`9/12` 类物体和 `20/24` 个指令模板；所有 20 条候选均通过时序对齐、LiDAR 几何和 6 维动作审计，尚未开始正式 SmolVLA 训练。
+- 当前 v2 有效训练样本为 `21` 条、`6,720` 帧，覆盖 `8/8` 个训练场景、`9/12` 类物体和 `20/24` 个指令模板；所有 21 条候选均通过时序对齐、LiDAR 几何和 6 维动作审计，尚未开始正式 SmolVLA 训练。
 
-### 当前状态快照（2026-07-23 20:36，中国标准时间）
+### 当前状态快照（2026-07-23 20:38，中国标准时间）
 
-- 单进程批量采集仍在运行：`train_0068` 正在 Isaac Sim headless 中采集；不要启动第二个 ObjectNav Kit 进程。
-- `train_0066`、`train_0067` 已完成并通过：均 `success=true`、`terminated_steps=0`，并生成可读 H.264 视频、HDF5 和 JSON 指标。`train_0066` 的最终目标距离为 `0.7451 m`，`train_0067` 为 `0.7497 m`。
-- 最近一次 v2 审计（`train_0067` 后）：总库存 `21` 条（其中 1 条为已归档损坏文件），有效候选 `20` 条、`6,400` 帧；场景覆盖 `8/8`，物体类别 `9/12`，指令模板 `20/24`。
+- 单进程批量采集仍在运行：`train_0069` 正在 Isaac Sim headless 中采集；不要启动第二个 ObjectNav Kit 进程。
+- `train_0067`、`train_0068` 已完成并通过：均 `success=true`、`terminated_steps=0`，并生成可读 H.264 视频、HDF5 和 JSON 指标。`train_0067` 的最终目标距离为 `0.7497 m`，`train_0068` 为 `0.7473 m`。
+- 最近一次 v2 审计（`train_0068` 后）：总库存 `22` 条（其中 1 条为已归档损坏文件），有效候选 `21` 条、`6,720` 帧；场景覆盖 `8/8`，物体类别 `9/12`，指令模板 `20/24`。
 - 当前门禁：`ready_for_visible_objectnav_finetune=false`、`ready_for_smolvla_finetune=false`。尚未有 SmolVLA 微调 checkpoint，也没有把专家数据当作 VLA 成果。
 - 下一个可验证里程碑是补齐 `12/12` 物体和 `24/24` 指令模板后，执行正式 LeRobot 转换、从头微调 v2 SmolVLA，并用未见场景视频验收；隐藏搜索和 1 m 障碍跳跃仍是后续独立阶段。
 
