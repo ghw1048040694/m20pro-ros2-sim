@@ -1,6 +1,6 @@
 # M20 Pro VLA 具身智能仿真项目记录
 
-Last updated: 2026-07-22 CST
+Last updated: 2026-07-23 CST
 
 ## 项目边界
 
@@ -461,6 +461,25 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - 下一步固定为：完成高层 DAgger 主循环；在 learner `-12 deg` 状态分布上用公开 M20 专家以 `0.25-0.5` 概率干预 command，始终保存当前状态的专家 command/action 标签；验证 HDF5、H.264 视频和稳定性后训练 v17。加入 `-12 deg` 数据后，泛化验收必须改用未参与训练的 `+20 deg` 或 `-8 deg`。
 - 最新存储审计：datasets `254 MB`、public experts `56 MB`、checkpoints `20 MB`、videos `14 MB`、logs `3.4 MB`。全盘实际存在 `63` 个 MP4，编码检查为 `63/63 H.264`，FFmpeg 完整逐帧解码失败数为 `0`。
 
+### v17-v19 DAgger 结果与旧路线终止（2026-07-23）
+
+- high-level skill DAgger 已完整接入：采集器保存 learner command、专家干预标记、canonical skill 以及公开 M20 专家的 command/action 标签；训练器支持 DAgger 固定进入训练 split、只训练导航 heads 和冻结 target head。新增 HDF5 已检查长度一致、数值有限，回放视频均为 H.264。
+- v18 在参与 DAgger 适配的红色目标 `-12 deg` 初始朝向上通过窄场景验收：第 `81` 步进入 `0.8 m` 半径，第 `114` 步停车，最小/最终距离 `0.5355/0.6716 m`，停车后保持 `306` 帧，最低根高 `0.4610 m`，`terminated_steps=0`。代表视频为 `videos/m20_vla_skill_v18/red_center_initial_yaw_m12_last_confirm3_v2/m20-vla-skill-step-0.mp4`。
+- v19 在未见 `+20 deg` 初始朝向上虽然第 `198` 步经过目标、最小距离 `0.2497 m`，但从未停车，最终距离扩大到 `3.2797 m`，严格 `success=false`。这说明 DAgger 只改善了局部状态分布，未解决随机方位泛化。
+- 当前网络只是小型 CNN + UTF-8 byte embedding + 手写 `forward/left/right/search/stop/jump` 技能 head。训练集没有 jump 正标签，所谓 search 也只是 canonical command；它没有预训练语言语义、开放词汇物体理解、多房间记忆或 parkour 能力。因此旧模型不再称为 VLA 成果，v18 仅归档为 M20 低层/单目标可复现基线，v19 归档为代表性泛化失败。
+- 不再围绕 v19 继续调停车阈值或追加相同单色方块 episode。后续验收必须报告多 episode 任务成功率；单次成功、离线 loss、技能准确率或“曾经过目标”均不能作为原始任务完成证据。
+
+### 官方 SmolVLA 本机运行基线（2026-07-23）
+
+- 主线切换到公开预训练 VLA `lerobot/smolvla_base`，固定 revision `c83c3163b8ca9b7e67c509fffd9121e66cb96205`。模型为 `450,046,176` 参数，输入多视角 RGB、状态和自然语言，使用 flow matching 输出连续 action chunk；官方权重公开且非 gated，LeRobot 采用 Apache-2.0。
+- 权重和运行环境均放在 2 TB 盘。checkpoint 文件为 `907 MB`，已按 Git LFS 声明验证 SHA-256：`7cd549ac2351fb069c0ddb3c34ad2d09cfc92b56a15dccdfc2e41467aaca01eb`。SmolVLM2 tokenizer/processor 固定 revision `7b375e1b73b11138ff12fe22c8f2822d8fe03467`，没有重复下载 VLM 权重。
+- LeRobot `0.4.4` 使用独立 overlay 环境 `M20ProVLA/envs/m20pro-smolvla`，只读复用原 `m20pro-vla` 中已验证的 PyTorch `2.7.0+cu128` 和 CUDA 库，没有替换 Isaac Sim 的 torch。环境入口为 [activate_smolvla_env.sh](scripts/activate_smolvla_env.sh)。
+- [check_smolvla.py](scripts/check_smolvla.py) 已完成严格 checkpoint 加载和三视角合成输入 smoke：输出 action shape `1 x 50 x 6`，数值全部有限；正式 wrapper 复测模型加载约 `19.68 s`，一次 10-step flow inference 约 `0.823 s`，RTX 3060 峰值分配显存约 `1214 MiB`。该结果只证明预训练 VLA runtime 可行，不代表已有导航能力。
+- 新的高层动作接口固定为 6 维连续 action chunk，承载 M20 的速度、转向、停止/搜索/跨越意图；16 维关节控制继续由已验证的 learned locomotion/未来 parkour expert 执行。目标是让 VLA 学视觉语言决策，不让它重新学习基础关节稳定性。
+- 新增 [m20pro_vla_eval_v1.yaml](configs/m20pro_vla_eval_v1.yaml)：训练至少覆盖 `8` 个场景、`12` 类物体和 `24` 个指令模板；测试分别包含 seen/unseen object 的独立场景和指令，并单独统计 visible ObjectNav、隐藏物体主动搜索、place navigation 和 1 m 障碍。所有 episode 必须保存 H.264 视频和 JSON，offline loss 不作为验收指标。
+- 下载分片在 SHA-256 通过后已清理，最终 SmolVLA 模型目录约 `865 MB`、processor 约 `4.8 MB`、overlay 环境约 `651 MB`。当前其他产物为 datasets `322 MB`、checkpoints `29 MB`、videos `18 MB`、logs `6.1 MB`、public experts `56 MB`，均位于 2 TB 盘。
+- 对视频目录重新做了全量审计：实际 `77/77` 个 MP4 均为 H.264，并用打包 FFmpeg 从首帧到末帧完整解码，失败数为 `0`。这替代此前只覆盖 `63` 个文件的历史结论。
+
 v14 绿色目标复现命令（显式无头并录制视频）：
 
 ```bash
@@ -477,11 +496,11 @@ python scripts/play_m20_vla_skill.py --headless --video \
 
 ## 待办路线
 
-1. 完成 high-level skill DAgger，采集 learner 闭环分布上的专家 command/action 标签，训练 v17，并在未见初始朝向上做带视频验收。
-2. 为高层增加真实 `search` 轨迹和后视相机闭环：目标放在侧后方，训练转向/扫描/重新获取目标，而不是把横向进入半径当作成功。
-3. 解决 jump skill 的物理能力问题：优先查找官方动作/仿真协议或调整 M20 USD/执行器，未通过高度、越障、着地稳定和视频检查不得进入 VLA 数据。
-4. 将成功 rolling/search/jump 数据扩展为 LeRobot-compatible episode/skill schema，保留专家来源、传感器时间戳和视频索引。
-5. 在具备成功 jump expert 后加入随机障碍、1 m 越障、地图/无地图和开放词汇物体搜索评测；所有 VLA checkpoint 都以闭环视频和任务成功率验收，而不是只看离线 loss。
+1. 把现有 HDF5 成功专家数据转换成 LeRobot v3 schema：前/后 RGB、LiDAR 派生特征、本体状态、6 维高层 action chunk、自然语言、专家来源、时间戳和视频索引；先做 schema/时序审计，不立即训练。
+2. 建立至少 8 个随机室内场景、12 类可辨识物体和 held-out 指令的 Isaac Sim 数据生成与闭环评测，先完成 `configs/m20pro_vla_eval_v1.yaml` 的 Stage 2 visible ObjectNav。
+3. 在前后相机中加入目标位于侧后方、被遮挡和跨房间的专家轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。
+4. 接入可验证的公开四足 parkour checkpoint。若没有 M20 的 1 m 障碍专家，由于项目仅做仿真且不要求沿用 M20 动力学，切换到有公开 checkpoint 的 Go1/ANYmal 仿真资产完成 parkour 分支，不再用失败关节序列冒充 jump 数据。
+5. SmolVLA 微调采用冻结视觉主干、训练 action expert/state projection 的单卡配置；任何 checkpoint 在进入下一阶段前必须在独立 test split 运行全部 episode 并生成 H.264 视频和 aggregate JSON。
 
 ### 并行环境容量基准
 

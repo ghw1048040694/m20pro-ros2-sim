@@ -118,3 +118,20 @@ TERM=xterm python scripts/check_m20pro_task.py --headless
 ```
 
 VLA 兴趣项目的持续记录位于 [`m20pro-VLA.md`](m20pro-VLA.md)，每次本项目对话后更新。
+
+### 预训练 SmolVLA 基线
+
+旧的小型 CNN/字节文本行为克隆网络只保留为 M20 低层运动基线，不再作为
+VLA 主线。新的高层策略使用官方 `lerobot/smolvla_base`（固定 revision
+`c83c316`），LeRobot 环境位于 2 TB 盘，并复用已验证的 PyTorch
+2.7/CUDA 12.8 运行库，不修改 Isaac Sim 环境。
+
+检查官方 checkpoint 完整性、严格加载和一次三视角 action-chunk 推理：
+
+```bash
+./scripts/check_smolvla.sh
+```
+
+该命令只验证预训练 VLA 在 RTX 3060 12 GB 上可运行，不代表已经完成导航。
+多房间、未见物体、隐藏目标搜索和 1 m 障碍的验收定义位于
+`configs/m20pro_vla_eval_v1.yaml`，必须以闭环成功率和逐 episode H.264 视频验收。
