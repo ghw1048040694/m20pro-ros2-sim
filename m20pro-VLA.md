@@ -503,11 +503,13 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - 正式采集命令为 `./scripts/collect_m20_visible_objectnav.sh train_0000`；它默认拒绝覆盖已有 episode。正式 HDF5/JSON 位于 `datasets/m20_visible_objectnav_v1/train/`，视频位于 `videos/m20_visible_objectnav_v1/train/`。
 - 主审计现为 `31` 条/`14,290` 帧，其中新规范 `smolvla_candidate=2`、`smolvla_eligible=2`。新数据的“候选数据全部时序对齐”、“场景几何进入 LiDAR”和“6 维动作完整”三项已通过；场景/物体/模板覆盖为 `2/8`、`2/12`、`2/24`，所以 `ready_for_visible_objectnav_finetune=false`，未开始 SmolVLA 微调。
 - `train_0009` 复测（第二个布局、第二类 YCB 物体、初始朝向 `-23.206 deg`）已严格通过：第 `158` 帧进入 `0.8 m` 半径，最终距离 `0.7796 m`，路径长 `2.8926 m`，最低根高 `0.4891 m`，`terminated_steps=0`，`success=true`；视频为 `320` 帧 H.264。该复测确认 `train_0000` 的专家参数不是单场景特例，但也暴露出当前工作仍只是“成功专家数据生成”，不是 VLA 学习结果。
+- 批次复测 `train_0002`（第三个布局、主厨罐头）和 `train_0016`（第一个布局、糖盒）均严格成功：前者第 `100` 帧到达，最终距离 `0.7451 m`、路径 `2.9238 m`、最低根高 `0.4722 m`；后者第 `114` 帧到达，最终距离 `0.7964 m`、路径 `2.5035 m`、最低根高 `0.4308 m`。两条均 `terminated_steps=0`、无专家干预、视频 `320` 帧 H.264。
+- 这批完成后的审计为 `33` 条/`14,930` 帧；新规范候选 `4` 条、可见 ObjectNav 覆盖为场景 `3/8`、物体 `3/12`、模板 `4/24`，所有候选仍通过时序对齐、LiDAR 几何和 6 维动作门。隐藏搜索、1 米障碍 LiDAR 和 jump 仍为 `0`，所以两个 `ready_for_*_finetune` 仍为 `false`。
 
 ### 当前阶段判断与下一步（2026-07-23）
 
 - 用户对“长时间运行后只有一条展示视频”的不满意是合理的：当前还没有 SmolVLA 微调 checkpoint，也没有未见场景闭环成功率。两条规范样本只能验证采集链路和低层专家稳定性，不能作为任务完成证据。
-- 当前审计摘要：`31` 条 HDF5、`14,290` 帧；新规范候选 `2` 条且全部通过时序/数值审计；可见 ObjectNav 覆盖为场景 `2/8`、物体 `2/12`、模板 `2/24`；隐藏搜索成功 `0`，1 米障碍 LiDAR `0`，jump 标签 `0`。因此 `ready_for_visible_objectnav_finetune=false` 和 `ready_for_smolvla_finetune=false` 均保持不变。
+- 当前审计摘要：`33` 条 HDF5、`14,930` 帧；新规范候选 `4` 条且全部通过时序/数值审计；可见 ObjectNav 覆盖为场景 `3/8`、物体 `3/12`、模板 `4/24`；隐藏搜索成功 `0`，1 米障碍 LiDAR `0`，jump 标签 `0`。因此 `ready_for_visible_objectnav_finetune=false` 和 `ready_for_smolvla_finetune=false` 均保持不变。
 - 下一轮不再做单条手工展示，改为按 manifest 自动补齐训练覆盖。每完成一批就运行审计，只保留 `success=true`、视频可解码且候选门通过的 episode；覆盖达到 `8/12/24` 后再做 LeRobot v3 转换和 SmolVLA 微调。
 - 批量入口已加入 [collect_m20_visible_objectnav_batch.sh](scripts/collect_m20_visible_objectnav_batch.sh)。它逐条启动无头采集、把完整输出写入 2 TB 盘的批次日志，并在每条之后运行审计；失败 episode 不会被静默混入训练集。
 
