@@ -509,6 +509,7 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - 用户对“长时间运行后只有一条展示视频”的不满意是合理的：当前还没有 SmolVLA 微调 checkpoint，也没有未见场景闭环成功率。两条规范样本只能验证采集链路和低层专家稳定性，不能作为任务完成证据。
 - 当前审计摘要：`31` 条 HDF5、`14,290` 帧；新规范候选 `2` 条且全部通过时序/数值审计；可见 ObjectNav 覆盖为场景 `2/8`、物体 `2/12`、模板 `2/24`；隐藏搜索成功 `0`，1 米障碍 LiDAR `0`，jump 标签 `0`。因此 `ready_for_visible_objectnav_finetune=false` 和 `ready_for_smolvla_finetune=false` 均保持不变。
 - 下一轮不再做单条手工展示，改为按 manifest 自动补齐训练覆盖。每完成一批就运行审计，只保留 `success=true`、视频可解码且候选门通过的 episode；覆盖达到 `8/12/24` 后再做 LeRobot v3 转换和 SmolVLA 微调。
+- 批量入口已加入 [collect_m20_visible_objectnav_batch.sh](scripts/collect_m20_visible_objectnav_batch.sh)。它逐条启动无头采集、把完整输出写入 2 TB 盘的批次日志，并在每条之后运行审计；失败 episode 不会被静默混入训练集。
 
 v14 绿色目标复现命令（显式无头并录制视频）：
 
@@ -528,6 +529,7 @@ python scripts/play_m20_vla_skill.py --headless --video \
 
 1. 场景/物体/指令 manifest、MultiMesh LiDAR、同步 HDF5 和两个不同场景的严格成功 visible ObjectNav 已完成。
 2. 按 manifest 自动采集剩余训练覆盖，只保留 `success=true` 且通过数据审计的 episode；补齐 `8/12/24` 覆盖后，只在 `ready_for_visible_objectnav_finetune=true` 时进入 LeRobot v3 转换。
+   推荐首批覆盖命令：`./scripts/collect_m20_visible_objectnav_batch.sh train_0001 train_0002 train_0003 train_0004 train_0016 train_0024 train_0032 train_0040`。
 3. 转换后审计前/后 RGB、LiDAR 派生视觉特征、6 维高层 action chunk、本体状态、自然语言、专家来源、时间戳和 train/validation/test 隔离，再以冻结视觉主干的单卡配置微调 SmolVLA。
 4. 第一个验收不看 loss：对未参与训练的场景、指令和目标位置运行至少 `20` 个 visible ObjectNav 闭环 episode，交付成功率、失败类型、aggregate JSON 和逐 episode H.264 视频。
 5. 然后加入目标位于侧后方、被遮挡和跨房间的成功轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。

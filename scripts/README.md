@@ -115,6 +115,18 @@ python3 scripts/build_m20_objectnav_manifest.py
 ./scripts/audit_m20_smolvla_data.sh
 ```
 
+For a reproducible coverage run, pass several manifest IDs to the batch wrapper.
+It records one log per episode and runs the audit after every completed episode:
+
+```bash
+./scripts/collect_m20_visible_objectnav_batch.sh \
+  train_0001 train_0002 train_0003 train_0004 \
+  train_0016 train_0024 train_0032 train_0040
+```
+
+The wrapper continues through a failed episode, returns a non-zero status at the
+end, and never overwrites an existing episode unless `M20PRO_OVERWRITE=1` is set.
+
 The indoor collector uses the public M20 ONNX expert for leg stabilization and
 a PhysX velocity drive for the four wheel targets. Privileged target pose is
 used only to label successful demonstrations; it is explicitly prohibited and
