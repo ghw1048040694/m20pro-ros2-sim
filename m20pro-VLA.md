@@ -1,6 +1,6 @@
 # M20 Pro VLA 具身智能仿真项目记录
 
-Last updated: 2026-07-23 CST (21:32)
+Last updated: 2026-07-23 CST (23:05)
 
 ## 项目边界
 
@@ -558,6 +558,17 @@ python scripts/play_m20_vla_skill.py --headless --video \
 - 当前成果是“数据链路、SmolVLA 微调和低层运动稳定性已具备，首条视觉闭环尚未成功”，不能宣称完成 visible ObjectNav。
 - 立即任务改为记录至少 `5` 条闭环的完整 stop 预测曲线，并核对相同场景的训练帧与回放帧输入/归一化；只在不使用目标坐标的前提下重新标定 stop 阈值和确认逻辑。
 - stop 校准通过后，才汇总未见场景/目标的多 episode 成功率；隐藏物体主动搜索、place navigation 和 `1 m` 障碍跳跃仍未开始，当前门禁继续为 `false`。
+
+### v3 DAgger SmolVLA 训练与 learner-only 闭环验收（2026-07-23 23:05）
+
+- 联合数据已完成审计：`34` 条 episode、`3330` 帧，覆盖 `8/8` 场景、`12/12` 物体类别和 `24/24` 指令模板；时序、LiDAR 场景几何和 6 维高层动作门全部通过。隐藏目标搜索、1 m 障碍 LiDAR 和 jump 标签仍为 `0`，没有提前进入后续分支。
+- `smolvla_objectnav_v3_dagger1_1000` 已完成 `1000/1000` steps。最终模型为 `checkpoints/001000/pretrained_model`，训练配置使用 v3 DAgger 数据集；该 checkpoint 已通过加载校验。
+- 新增/修正回放入口：接受 `001000` 父目录或 `pretrained_model` 目录，默认使用 v3 stats 和 `stop_threshold=0.4`。learner-only 回放未启用 `--smolvla-dagger-labels`，目标坐标只用于离线评估，不能触发制动。
+- 五条验收场景中四条完整运行：`train_0000/0009/0027/0073` 的严格成功率为 `0/4`，目标接近率为 `4/4`，停车 latch 为 `0/4`，跌倒率为 `4/4`；最低根高均约 `0.070 m`，说明持续前进命令把低层执行器推入失稳。`train_0090` 在 USD 姿态矩阵 `OrthogonalizeBasis did not converge` 后无进展，已中止并记为无效回放。
+- 四条完整回放的 JSON/H.264 视频均已生成于 `logs/smolvla_objectnav_replay/` 和 `videos/smolvla_objectnav_replay/`。代表结果：`train_0000` 最小目标距离 `0.537 m`、第 `84` 步进入目标区但未停车；`train_0027` 最小距离 `0.054 m` 仍未停车。
+- 新 checkpoint 的离线动作审计（128 帧）为 `mean_action_mae=0.0311`、`forward_mae=0.0370`、`yaw_mae=0.0415`、`stop_accuracy=0.9375`；这只说明 held-out 动作拟合，不能当作闭环成功。
+- 同一回放帧的多次 SmolVLA 推理显示 flow-matching 采样具有明显随机性：`train_0000` 第 100 帧 stop 输出在不同采样中约 `-0.05~0.99`，单次回放采样可能只有 `0.077`，而停车逻辑要求连续 5 次超过 `0.4`。因此当前主要问题是随机 action chunk 导致 stop 不稳定及其后的持续前进，不是简单增加训练步数。
+- 当前结论：v3 仍不能称为 visible ObjectNav 成果；应先做固定/集成推理和动作安全包络实验，稳定停车且不跌倒后再汇总多场景成功率。隐藏搜索、place navigation 和 1 m 跳跃继续冻结。
 
 ## 待办路线
 

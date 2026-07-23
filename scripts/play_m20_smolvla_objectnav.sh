@@ -8,6 +8,12 @@ CHECKPOINT="${1:?Usage: $0 CHECKPOINT_DIR SCENARIO_EPISODE_ID [extra args...]}"
 EPISODE_ID="${2:?Usage: $0 CHECKPOINT_DIR SCENARIO_EPISODE_ID [extra args...]}"
 shift 2
 
+# LeRobot stores the policy files below a step checkpoint's pretrained_model
+# directory. Accept either that directory or its parent for convenient replay.
+if [[ -d "${CHECKPOINT}/pretrained_model" && -f "${CHECKPOINT}/pretrained_model/config.json" ]]; then
+  CHECKPOINT="${CHECKPOINT}/pretrained_model"
+fi
+
 source "${SCRIPT_DIR}/activate_vla_env.sh"
 export PYTHONPATH="${DATA_ROOT}/envs/m20pro-smolvla/lib/python3.11/site-packages:${PYTHONPATH:-}"
 export HF_HOME="${DATA_ROOT}/huggingface"
@@ -21,9 +27,9 @@ exec python "${SCRIPT_DIR}/record_public_m20_expert.py" \
   --output-dir "${DATA_ROOT}/logs/smolvla_objectnav_replay/${EPISODE_ID}" \
   --video-dir "${DATA_ROOT}/videos/smolvla_objectnav_replay/${EPISODE_ID}" \
   --smolvla-checkpoint "${CHECKPOINT}" \
-  --smolvla-dataset-root "${DATA_ROOT}/datasets/m20_visible_objectnav_lerobot_v2" \
+  --smolvla-dataset-root "${M20PRO_SMOLVLA_DATASET_ROOT:-${DATA_ROOT}/datasets/m20_visible_objectnav_lerobot_v3_dagger1}" \
   --smolvla-model-device cuda \
   --smolvla-action-hold-steps 10 \
-  --smolvla-stop-threshold 1.10 \
+  --smolvla-stop-threshold 0.4 \
   --smolvla-stop-confirm-steps 5 \
   "$@"

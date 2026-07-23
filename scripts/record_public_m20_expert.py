@@ -151,6 +151,47 @@ parser.add_argument(
     help="Run the trained SmolVLA high-level policy in learner-only mode.",
 )
 parser.add_argument(
+    "--smolvla-dagger-labels",
+    action="store_true",
+    help=(
+        "Execute SmolVLA while writing the privileged simulation expert's "
+        "6-D labels; learner actions are retained for DAgger diagnostics."
+    ),
+)
+parser.add_argument(
+    "--smolvla-dagger-expert-alpha",
+    type=float,
+    default=0.0,
+    help="Blend this fraction of the expert command into a SmolVLA DAgger rollout.",
+)
+parser.add_argument(
+    "--smolvla-dagger-visible-intervention-fraction",
+    type=float,
+    default=0.01,
+    help=(
+        "When DAgger labels are enabled, use the expert command if the target "
+        "pixel fraction falls below this value; zero disables this intervention."
+    ),
+)
+parser.add_argument(
+    "--smolvla-dagger-visible-intervention-armed-fraction",
+    type=float,
+    default=0.05,
+    help=(
+        "Arm the visibility intervention only after the target has reached "
+        "this pixel fraction, preventing an expert takeover at episode start."
+    ),
+)
+parser.add_argument(
+    "--smolvla-dagger-stability-intervention-height",
+    type=float,
+    default=0.48,
+    help=(
+        "During DAgger collection, use the expert command below this root "
+        "height; zero disables the stability intervention."
+    ),
+)
+parser.add_argument(
     "--smolvla-dataset-root",
     type=Path,
     default=DATA_ROOT / "datasets/m20_visible_objectnav_lerobot_v2",
@@ -261,6 +302,23 @@ if args.smolvla_checkpoint is not None and (
     parser.error("--smolvla-checkpoint cannot be combined with DAgger checkpoints")
 if args.smolvla_checkpoint is not None and not args.smolvla_checkpoint.is_dir():
     parser.error(f"SmolVLA checkpoint directory not found: {args.smolvla_checkpoint}")
+if args.smolvla_dagger_labels and args.smolvla_checkpoint is None:
+    parser.error("--smolvla-dagger-labels requires --smolvla-checkpoint")
+if not 0.0 <= args.smolvla_dagger_expert_alpha <= 1.0:
+    parser.error("--smolvla-dagger-expert-alpha must be in [0, 1]")
+if args.smolvla_dagger_expert_alpha > 0.0 and not args.smolvla_dagger_labels:
+    parser.error("--smolvla-dagger-expert-alpha requires --smolvla-dagger-labels")
+if not 0.0 <= args.smolvla_dagger_visible_intervention_fraction <= 1.0:
+    parser.error("--smolvla-dagger-visible-intervention-fraction must be in [0, 1]")
+if not 0.0 <= args.smolvla_dagger_visible_intervention_armed_fraction <= 1.0:
+    parser.error("--smolvla-dagger-visible-intervention-armed-fraction must be in [0, 1]")
+if (
+    args.smolvla_dagger_visible_intervention_fraction
+    > args.smolvla_dagger_visible_intervention_armed_fraction
+):
+    parser.error("visibility intervention fraction must not exceed its armed fraction")
+if not 0.0 <= args.smolvla_dagger_stability_intervention_height <= 1.0:
+    parser.error("--smolvla-dagger-stability-intervention-height must be in [0, 1]")
 if args.smolvla_action_hold_steps <= 0 or args.smolvla_stop_confirm_steps <= 0:
     parser.error("SmolVLA hold and stop confirmation steps must be positive")
 if args.smolvla_stop_threshold <= 0.0:
@@ -927,6 +985,17 @@ def main() -> None:
             None if args.smolvla_checkpoint is None else str(args.smolvla_checkpoint)
         ),
         "smolvla_learner_only": args.smolvla_checkpoint is not None,
+        "smolvla_dagger_labels": args.smolvla_dagger_labels,
+        "smolvla_dagger_expert_alpha": args.smolvla_dagger_expert_alpha,
+        "smolvla_dagger_visible_intervention_fraction": (
+            args.smolvla_dagger_visible_intervention_fraction
+        ),
+        "smolvla_dagger_visible_intervention_armed_fraction": (
+            args.smolvla_dagger_visible_intervention_armed_fraction
+        ),
+        "smolvla_dagger_stability_intervention_height": (
+            args.smolvla_dagger_stability_intervention_height
+        ),
         "smolvla_action_hold_steps": args.smolvla_action_hold_steps,
         "smolvla_stop_threshold": args.smolvla_stop_threshold,
         "smolvla_stop_confirm_steps": args.smolvla_stop_confirm_steps,
@@ -1061,6 +1130,9 @@ def main() -> None:
         expert_intervention_steps = 0
         stochastic_intervention_steps = 0
         forced_stop_intervention_steps = 0
+        smolvla_visible_intervention_steps = 0
+        smolvla_stability_intervention_steps = 0
+        smolvla_target_intervention_steps = 0
         learner_skill_counts = {name: 0 for name in SKILL_NAMES}
         target_visible_at_start: bool | None = None
         max_target_pixel_fraction = 0.0
@@ -1084,6 +1156,13 @@ def main() -> None:
             command_ds = h5.create_dataset("expert_command", (args.steps, 3), dtype="f4", compression="lzf")
             high_level_action_ds = h5.create_dataset(
                 "high_level_action", (args.steps, 6), dtype="f4", compression="lzf"
+            )
+            smolvla_learner_action_ds = (
+                h5.create_dataset(
+                    "smolvla_learner_action", (args.steps, 6), dtype="f4", compression="lzf"
+                )
+                if args.smolvla_dagger_labels
+                else None
             )
             learner_command_ds = (
                 h5.create_dataset("learner_command", (args.steps, 3), dtype="f4", compression="lzf")
@@ -1118,6 +1197,14 @@ def main() -> None:
             h5.attrs["sensor_alignment"] = metadata["sensor_alignment"]
             h5.attrs["smolvla_state_schema"] = (
                 "body_linear_velocity_3,body_angular_velocity_3,projected_gravity_xy_2,lidar_sector_min_24"
+            )
+            h5.attrs["smolvla_dagger_labels"] = args.smolvla_dagger_labels
+            h5.attrs["smolvla_dagger_expert_alpha"] = args.smolvla_dagger_expert_alpha
+            h5.attrs["smolvla_dagger_visible_intervention_fraction"] = (
+                args.smolvla_dagger_visible_intervention_fraction
+            )
+            h5.attrs["smolvla_dagger_visible_intervention_armed_fraction"] = (
+                args.smolvla_dagger_visible_intervention_armed_fraction
             )
             h5.attrs["camera_pitch_deg"] = args.camera_pitch_deg
             h5.attrs["camera_focal_length"] = args.camera_focal_length
@@ -1331,7 +1418,15 @@ def main() -> None:
                     stochastic_intervention_steps += int(stochastic_intervention)
                     forced_stop_intervention_steps += int(forced_stop_intervention)
                 execution_command = (
-                    learner_command
+                    (
+                        tuple(
+                            (1.0 - args.smolvla_dagger_expert_alpha) * learner_value
+                            + args.smolvla_dagger_expert_alpha * expert_value
+                            for learner_value, expert_value in zip(learner_command, expert_command)
+                        )
+                        if args.smolvla_dagger_labels
+                    else learner_command
+                    )
                     if smolvla_model is not None
                     else (
                         expert_command
@@ -1339,11 +1434,42 @@ def main() -> None:
                         else learner_command
                     )
                 )
-                # Pre-trigger is a high-level stop label only. Switching the
-                # wheel target before the measured success radius destabilizes
-                # the released M20 locomotion policy, so physical braking is
-                # enabled only after target_reached becomes true.
-                wheel_stop_mode = target_reached
+                visible_intervention = bool(
+                    smolvla_model is not None
+                    and args.smolvla_dagger_labels
+                    and args.smolvla_dagger_visible_intervention_fraction > 0.0
+                    and not target_reached
+                    and max_target_pixel_fraction
+                    >= args.smolvla_dagger_visible_intervention_armed_fraction
+                    and max(front_target_fraction, rear_target_fraction)
+                    < args.smolvla_dagger_visible_intervention_fraction
+                )
+                if visible_intervention:
+                    execution_command = expert_command
+                    smolvla_visible_intervention_steps += 1
+                stability_intervention = bool(
+                    smolvla_model is not None
+                    and args.smolvla_dagger_labels
+                    and args.smolvla_dagger_stability_intervention_height > 0.0
+                    and float(robot.data.root_pos_w[0, 2].item())
+                    < args.smolvla_dagger_stability_intervention_height
+                )
+                if stability_intervention:
+                    execution_command = expert_command
+                    smolvla_stability_intervention_steps += 1
+                target_intervention = bool(
+                    smolvla_model is not None
+                    and args.smolvla_dagger_labels
+                    and target_reached
+                )
+                if target_intervention:
+                    execution_command = expert_command
+                    smolvla_target_intervention_steps += 1
+                # Target pose is evaluation/label truth only. A learner-only
+                # SmolVLA replay may brake only after its own stop latch.
+                wheel_stop_mode = (
+                    smolvla_stop_latched if smolvla_model is not None else target_reached
+                )
                 set_navigation_wheel_damping(robot, execution_command, wheel_stop_mode)
                 planar_speed = float(
                     torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item()
@@ -1389,7 +1515,7 @@ def main() -> None:
                         robot,
                         joint_ids,
                         policy_last_action,
-                        (learner_command if smolvla_model is not None else expert_command),
+                        (execution_command if smolvla_model is not None else expert_command),
                         False if smolvla_model is not None else wheel_stop_mode,
                     )
                 execution_action = expert_action
@@ -1445,7 +1571,22 @@ def main() -> None:
                 front_target_fraction_ds[step] = front_target_fraction
                 rear_target_fraction_ds[step] = rear_target_fraction
                 if smolvla_model is not None:
-                    high_level_action_ds[step] = smolvla_cached_action
+                    if smolvla_learner_action_ds is not None:
+                        smolvla_learner_action_ds[step] = smolvla_cached_action
+                    if args.smolvla_dagger_labels:
+                        high_level_action_ds[step] = np.asarray(
+                            [
+                                expert_command[0],
+                                expert_command[1],
+                                expert_command[2],
+                                float(target_reached or pretrigger_active),
+                                0.0,
+                                0.0,
+                            ],
+                            dtype=np.float32,
+                        )
+                    else:
+                        high_level_action_ds[step] = smolvla_cached_action
                 else:
                     high_level_action_ds[step] = np.asarray(
                         [
@@ -1550,6 +1691,9 @@ def main() -> None:
             h5.attrs["dagger_skill_expert_interventions"] = expert_intervention_steps
             h5.attrs["dagger_skill_stochastic_interventions"] = stochastic_intervention_steps
             h5.attrs["dagger_skill_forced_stop_interventions"] = forced_stop_intervention_steps
+            h5.attrs["smolvla_visible_intervention_steps"] = smolvla_visible_intervention_steps
+            h5.attrs["smolvla_stability_intervention_steps"] = smolvla_stability_intervention_steps
+            h5.attrs["smolvla_target_intervention_steps"] = smolvla_target_intervention_steps
             h5.attrs["dagger_skill_learner_skill_counts"] = json.dumps(
                 learner_skill_counts,
                 sort_keys=True,
@@ -1609,6 +1753,9 @@ def main() -> None:
             "smolvla_stop_latched": smolvla_stop_latched,
             "smolvla_stop_latched_step": smolvla_stop_latched_step,
             "smolvla_inference_count": smolvla_inference_count,
+            "smolvla_visible_intervention_steps": smolvla_visible_intervention_steps,
+            "smolvla_stability_intervention_steps": smolvla_stability_intervention_steps,
+            "smolvla_target_intervention_steps": smolvla_target_intervention_steps,
             "max_post_stop_target_hold_steps": max_post_stop_target_hold_steps,
             "target_hold_steps_required": args.target_hold_steps,
             "min_target_distance_m": (

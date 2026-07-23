@@ -130,6 +130,8 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
         task = task_text(h5.attrs)
         success = bool(attrs.get("success", False))
         command_ok = bool(attrs.get("command_ok", True))
+        smolvla_dagger_labels = bool(attrs.get("smolvla_dagger_labels", False))
+        smolvla_dagger_partial = bool(attrs.get("smolvla_dagger_partial", False))
         stable_search = (
             "寻找" in task
             and int(attrs.get("terminated_steps", int(np.count_nonzero(terminated)))) == 0
@@ -137,8 +139,14 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
         )
         holdout = is_holdout(Path(relative_path))
         split = str(attrs.get("split", "legacy"))
+        dagger_rollout_stable = (
+            smolvla_dagger_labels
+            and (bool(attrs.get("target_reached", False)) or smolvla_dagger_partial)
+            and int(attrs.get("terminated_steps", int(np.count_nonzero(terminated)))) == 0
+            and float(attrs.get("min_root_height", 0.0)) >= 0.40
+        )
         train_eligible = (
-            (success and command_ok or stable_search)
+            (success and command_ok or stable_search or dagger_rollout_stable)
             and not holdout
             and (not smolvla_candidate or split == "train")
         )
@@ -244,9 +252,12 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 stop_indices = np.flatnonzero(stop_mask)
                 first_stop = int(stop_indices[0]) if len(stop_indices) else -1
                 stop_visibility_valid = bool(
-                    first_stop > 0
-                    and visibility[first_stop] > 1.0e-4
-                    and np.max(visibility[max(0, first_stop - 4) : first_stop + 1]) > 1.0e-4
+                    (smolvla_dagger_partial and first_stop < 0)
+                    or (
+                        first_stop > 0
+                        and visibility[first_stop] > 1.0e-4
+                        and np.max(visibility[max(0, first_stop - 4) : first_stop + 1]) > 1.0e-4
+                    )
                 )
                 if not stop_visibility_valid:
                     result["errors"].append("stop_label_begins_after_target_leaves_camera")
@@ -277,6 +288,9 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 "smolvla_candidate": smolvla_candidate,
                 "smolvla_eligible": smolvla_eligible,
                 "dagger": bool(attrs.get("dagger", False)),
+                "smolvla_dagger_labels": smolvla_dagger_labels,
+                "smolvla_dagger_partial": smolvla_dagger_partial,
+                "dagger_rollout_stable": dagger_rollout_stable,
                 "target_color": str(attrs.get("target_color", "none")),
                 "object_category": attrs.get("object_category"),
                 "object_source": attrs.get("object_source"),
@@ -434,7 +448,10 @@ def main() -> None:
             "smolvla_eligible_frames": sum(
                 int(episode["frames"]) for episode in smolvla_eligible
             ),
-            "dagger_train_episodes": sum(bool(episode.get("dagger")) for episode in eligible),
+            "dagger_train_episodes": sum(
+                bool(episode.get("dagger") or episode.get("smolvla_dagger_labels"))
+                for episode in eligible
+            ),
             "stable_search_partial_episodes": sum(
                 bool(episode.get("stable_search_partial_demo")) for episode in eligible
             ),
