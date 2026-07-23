@@ -95,6 +95,15 @@ Record additional native M20 expert trajectories only when their JSON
   --video-dir /media/fabu/b9cbb43d-5119-4328-99d9-10f7c0d91e37/M20ProVLA/videos/public_m20_native_v1
 ```
 
+Audit all M20 HDF5 episodes before any LeRobot conversion or SmolVLA
+fine-tuning. The command writes a machine-readable report under `logs/` and
+fails the readiness decision when scene coverage, timestamps, hidden search,
+obstacle LiDAR, or jump data are missing:
+
+```bash
+./scripts/audit_m20_smolvla_data.sh
+```
+
 Legacy PPO checkpoint files were removed during cleanup; their failure metrics
 remain in `m20pro-VLA.md`, but they are no longer a runnable storage target.
 

@@ -575,6 +575,8 @@ def main() -> None:
             "source": "public M20 ONNX leg policy plus target-bearing differential wheel expert",
         },
         "control_hz": 50.0, "joint_names": POLICY_JOINT_NAMES,
+        "sensor_alignment": "pre_action",
+        "lidar_mesh_scope": "ground_only",
         "observation": {"front_rgb": [args.image_height, args.image_width, 3], "rear_rgb": [args.image_height, args.image_width, 3],
                          "lidar": [ray_count], "proprio": [57], "state": [45], "expert_command": [3]},
         "dagger_observation": {
@@ -657,6 +659,8 @@ def main() -> None:
                 else None
             )
             done_ds = h5.create_dataset("terminated", (args.steps,), dtype="u1")
+            timestamp_ds = h5.create_dataset("timestamp", (args.steps,), dtype="f8")
+            frame_index_ds = h5.create_dataset("frame_index", (args.steps,), dtype="i8")
             h5.attrs["task_text"] = args.task_text
             h5.attrs["command"] = np.asarray([args.command_x, args.command_y, args.command_yaw], dtype=np.float32)
             h5.attrs["stop_after"] = -1 if args.stop_after is None else args.stop_after
@@ -669,6 +673,9 @@ def main() -> None:
             h5.attrs["wheel_damping"] = WHEEL_DAMPING
             h5.attrs["expert"] = metadata["expert"]
             h5.attrs["asset_usd_path"] = metadata["asset_usd_path"]
+            h5.attrs["control_hz"] = metadata["control_hz"]
+            h5.attrs["sensor_alignment"] = metadata["sensor_alignment"]
+            h5.attrs["lidar_mesh_scope"] = metadata["lidar_mesh_scope"]
             h5.attrs["dagger"] = metadata["dagger"]
             h5.attrs["dagger_alpha"] = args.dagger_alpha
             h5.attrs["dagger_skill"] = metadata["dagger_skill"]
@@ -705,6 +712,16 @@ def main() -> None:
                 front_observation = rgb(front)
                 rear_observation = rgb(rear)
                 lidar_observation = scan(lidar)
+                state_observation = torch.cat(
+                    (
+                        robot.data.root_pos_w[0],
+                        robot.data.root_quat_w[0],
+                        robot.data.root_lin_vel_w[0],
+                        robot.data.root_ang_vel_w[0],
+                        robot.data.joint_pos[0],
+                        robot.data.joint_vel[0],
+                    )
+                ).cpu().numpy().astype(np.float32)
                 # VLA always receives the robot's physical (unmirrored)
                 # proprio frame. Mirroring is an implementation detail of
                 # the public ONNX expert for negative-yaw commands only.
@@ -853,7 +870,6 @@ def main() -> None:
                     scene.update(physics_dt)
                 frame = rgb(third)
                 video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                state = torch.cat((robot.data.root_pos_w[0], robot.data.root_quat_w[0], robot.data.root_lin_vel_w[0], robot.data.root_ang_vel_w[0], robot.data.joint_pos[0], robot.data.joint_vel[0])).cpu().numpy().astype(np.float32)
                 front_ds[step], rear_ds[step], lidar_ds[step] = (
                     front_observation,
                     rear_observation,
@@ -861,10 +877,12 @@ def main() -> None:
                 )
                 proprio_ds[step], state_ds[step], action_ds[step] = (
                     vla_observation[0].cpu().numpy(),
-                    state,
+                    state_observation,
                     expert_action[0].cpu().numpy(),
                 )
                 command_ds[step] = np.asarray(expert_command, dtype=np.float32)
+                timestamp_ds[step] = step / metadata["control_hz"]
+                frame_index_ds[step] = step
                 if learner_command_ds is not None and expert_intervention_ds is not None:
                     learner_command_ds[step] = np.asarray(learner_command, dtype=np.float32)
                     expert_intervention_ds[step] = int(expert_intervention)

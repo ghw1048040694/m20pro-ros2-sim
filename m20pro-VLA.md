@@ -480,6 +480,17 @@ videos/v20_frozen_stop_blue_300/  # 冻结动作头 + learned stop
 - 下载分片在 SHA-256 通过后已清理，最终 SmolVLA 模型目录约 `865 MB`、processor 约 `4.8 MB`、overlay 环境约 `651 MB`。当前其他产物为 datasets `322 MB`、checkpoints `29 MB`、videos `18 MB`、logs `6.1 MB`、public experts `56 MB`，均位于 2 TB 盘。
 - 对视频目录重新做了全量审计：实际 `77/77` 个 MP4 均为 H.264，并用打包 FFmpeg 从首帧到末帧完整解码，失败数为 `0`。这替代此前只覆盖 `63` 个文件的历史结论。
 
+### SmolVLA 数据就绪审计（2026-07-23）
+
+- 用户明确否决将当前展示当作项目成果。该判断是正确的：当前只完成了预训练 SmolVLA 运行时 smoke，没有 M20 微调 checkpoint，也没有未见场景闭环成功率，不能称为导航成果。
+- 新增 [audit_m20_smolvla_data.py](scripts/audit_m20_smolvla_data.py) 和 [audit_m20_smolvla_data.sh](scripts/audit_m20_smolvla_data.sh)，对所有 HDF5 的长度、dtype、有限值、高层动作标签、时间戳、传感器对齐、场景/物体/指令覆盖、隐藏搜索、障碍 LiDAR 和跳跃数据做机器可读审计。结果位于 `logs/m20_smolvla_data_audit_v1.json`。
+- 磁盘实际有 `29` 条、`13,650` 帧 HDF5；其中 `23` 条标记成功，`1` 条为 holdout，`25` 条满足宽松的候选训练条件（包含 `3` 条只会原地扫描的 partial search）。这些数据只覆盖红/绿/蓝 `3` 类色块和 `7` 种完全一致的指令文本，没有带 `scene_id` 的室内场景。
+- 三条 `寻找目标` 轨迹的 `target_reached=true` 是“场景无目标”时的初始化值，不是找到隐藏物体。收紧审计口径后，隐藏目标搜索成功为 `0`，障碍 LiDAR episode 为 `0`，jump episode 为 `0`。
+- 旧采集器中 RGB/LiDAR/proprio/动作在动作前采样，但 45 维 `state` 在动作后写入；且旧 HDF5 没有显式 `timestamp/frame_index`。因此时序对齐通过数为 `0/25`，不会在转换时伪造旧数据的对齐标记。
+- 当前 RayCaster 只将 `/World/ground` 列为 mesh，目标又是无碰撞色块。部分小于 `20 m` 的返回是姿态变化时射线命中地面，不能证明有障碍感知。未来数据必须将房间墙体和障碍几何显式加入 LiDAR mesh。
+- [record_public_m20_expert.py](scripts/record_public_m20_expert.py) 已将 45 维 `state` 移到动作前采样，新增 `timestamp/frame_index`，并写入 `sensor_alignment=pre_action` 和 `lidar_mesh_scope=ground_only`。旧数据保持原样，新采集才能通过对齐门。
+- 当前审计的 `7/7` 数据门均未通过，`ready_for_smolvla_finetune=false`。因此暂停“直接转换旧轨迹并微调”，先构建真正的随机室内场景、障碍可见 LiDAR 和成功专家数据。
+
 v14 绿色目标复现命令（显式无头并录制视频）：
 
 ```bash
@@ -496,11 +507,12 @@ python scripts/play_m20_vla_skill.py --headless --video \
 
 ## 待办路线
 
-1. 把现有 HDF5 成功专家数据转换成 LeRobot v3 schema：前/后 RGB、LiDAR 派生特征、本体状态、6 维高层 action chunk、自然语言、专家来源、时间戳和视频索引；先做 schema/时序审计，不立即训练。
-2. 建立至少 8 个随机室内场景、12 类可辨识物体和 held-out 指令的 Isaac Sim 数据生成与闭环评测，先完成 `configs/m20pro_vla_eval_v1.yaml` 的 Stage 2 visible ObjectNav。
-3. 在前后相机中加入目标位于侧后方、被遮挡和跨房间的专家轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。
-4. 接入可验证的公开四足 parkour checkpoint。若没有 M20 的 1 m 障碍专家，由于项目仅做仿真且不要求沿用 M20 动力学，切换到有公开 checkpoint 的 Go1/ANYmal 仿真资产完成 parkour 分支，不再用失败关节序列冒充 jump 数据。
-5. SmolVLA 微调采用冻结视觉主干、训练 action expert/state projection 的单卡配置；任何 checkpoint 在进入下一阶段前必须在独立 test split 运行全部 episode 并生成 H.264 视频和 aggregate JSON。
+1. 先建立至少 `8` 个随机室内场景、`12` 类真实物体和 `24` 个指令模板；墙体、家具和障碍必须进入 LiDAR mesh，采集器必须写入场景 ID、目标类别和统一动作前时间戳。
+2. 用成功专家在随机起点/朝向/目标位置上自动采集 visible ObjectNav，重跑 `./scripts/audit_m20_smolvla_data.sh`；只有 `ready_for_smolvla_finetune=true` 才进入 LeRobot v3 转换。
+3. 转换后审计前/后 RGB、LiDAR 派生视觉特征、6 维高层 action chunk、本体状态、自然语言、专家来源、时间戳和 train/validation/test 隔离，再以冻结视觉主干的单卡配置微调 SmolVLA。
+4. 第一个验收不看 loss：对未参与训练的场景、指令和目标位置运行至少 `20` 个 visible ObjectNav 闭环 episode，交付成功率、失败类型、aggregate JSON 和逐 episode H.264 视频。
+5. 然后加入目标位于侧后方、被遮挡和跨房间的成功轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。
+6. 接入可验证的公开四足 parkour checkpoint。若没有 M20 的 1 m 障碍专家，由于项目仅做仿真且不要求沿用 M20 动力学，切换到有公开 checkpoint 的 Go1/ANYmal 仿真资产完成 parkour 分支，不再用失败关节序列冒充 jump 数据。
 
 ### 并行环境容量基准
 

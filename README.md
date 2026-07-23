@@ -133,5 +133,12 @@ VLA 主线。新的高层策略使用官方 `lerobot/smolvla_base`（固定 revi
 ```
 
 该命令只验证预训练 VLA 在 RTX 3060 12 GB 上可运行，不代表已经完成导航。
+在转换或微调前对现有 HDF5 轨迹做结构、时序和任务覆盖审计：
+
+```bash
+./scripts/audit_m20_smolvla_data.sh
+```
+
+审计未通过时不启动 SmolVLA 微调。
 多房间、未见物体、隐藏目标搜索和 1 m 障碍的验收定义位于
 `configs/m20pro_vla_eval_v1.yaml`，必须以闭环成功率和逐 episode H.264 视频验收。
