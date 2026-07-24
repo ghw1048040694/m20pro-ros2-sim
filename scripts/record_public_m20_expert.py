@@ -82,7 +82,7 @@ parser.add_argument(
     "--success-final-tolerance",
     type=float,
     default=0.02,
-    help="Final-position hysteresis after holding inside the success radius.",
+    help="Post-stop hold and final-position hysteresis after entering the success radius.",
 )
 parser.add_argument("--nav-slow-radius", type=float, default=1.8)
 parser.add_argument("--nav-min-distance-scale", type=float, default=0.15, help="Minimum approach speed fraction before entering the success radius.")
@@ -2057,7 +2057,11 @@ def main() -> None:
                     effective_stop_latched = (
                         smolvla_stop_latched if smolvla_model is not None else stop_latched
                     )
-                    if effective_stop_latched and target_distance <= args.success_radius:
+                    if (
+                        effective_stop_latched
+                        and target_distance
+                        <= args.success_radius + args.success_final_tolerance
+                    ):
                         post_stop_target_hold_streak += 1
                         max_post_stop_target_hold_steps = max(
                             max_post_stop_target_hold_steps,

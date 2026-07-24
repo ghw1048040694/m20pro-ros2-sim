@@ -1,6 +1,6 @@
 # M20 Pro VLA 具身智能仿真项目记录
 
-Last updated: 2026-07-24 17:15 CST
+Last updated: 2026-07-24 17:30 CST
 
 ## 项目边界
 
@@ -605,11 +605,12 @@ python scripts/play_m20_vla_skill.py --headless --video \
 
 - 对 v3 的 `3330` 个训练帧做了几何复核：`582` 个 stop 正样本中有 `580` 个位于 `0.8 m` 成功半径之外，并同时带有非零前进命令；29 条 expert episode 的首 stop 距离为 `1.159-1.200 m`。根因是采集包装器设置 `stop_pretrigger_radius=1.20`，采集器又把 pretrigger 当成语义 stop。
 - 旧 converter 从源数据首 stop 后只保留 20 帧，因此恰好裁掉了真正进入 `0.8 m` 的监督。现在 converter 先用 pre-action `state[:2]` 与 `target_xy` 生成 `distance<=0.8` 的锁存 stop，再执行 tail 裁剪；目标坐标只用于离线监督修复，策略输入仍只有双目 RGB、机身状态和 LiDAR。
-- 采集端 stop 标签已改为只服从 `target_reached`，wrapper 显式使用 `success_radius=0.8`、禁用 legacy pretrigger；语义 stop 仍严格锁存于 `success_radius`，只在最终静止成功判定中使用显式 `0.02 m` 物理滞回。DAgger prefix 会按同一半径重算 stop 与 reached 元数据；源数据审计会阻止带早停/stop+运动冲突的数据直接训练，同时允许 canonical converter 做受控迁移。
+- 采集端 stop 标签已改为只服从 `target_reached`，wrapper 显式使用 `success_radius=0.8`、禁用 legacy pretrigger；语义 stop 仍严格锁存于 `success_radius`，只在停车后的静止保持与最终位置判定中使用显式 `0.02 m` 物理滞回。DAgger prefix 会按同一半径重算 stop 与 reached 元数据；源数据审计会阻止带早停/stop+运动冲突的数据直接训练，同时允许 canonical converter 做受控迁移。
 - 第一版重标数据集 `datasets/m20_visible_objectnav_lerobot_v4_stop08` 曾生成 `34` 条、`4168` 帧并修正 `838` 个提前 stop，但新增可观测性审计发现：`582` 个 retained stop 帧中有 `270` 个前后相机均看不到目标，30 条含 stop 的 episode 中有 8 条在 canonical 首 stop 当帧目标不可见。该数据集现已否决，只保留作诊断，不允许进入训练。
 - 相机 A/B 使用最差的 `train_0027` 验证了修复方向：焦距由 `18 mm` 降到 `12 mm` 后，首次进入 `0.8 m` 时的目标像素占比从 `0` 提升到 `7.22%`，20 个 stop tail 帧全部可见。stop 标签仍严格从 `0.8 m` 开始；最终静止位置只增加显式 `2 cm` 物理滞回，处理已在半径内稳定保持 100 帧后约 `4 mm` 的数值漂移，不恢复旧的 `10 cm` 宽松门限。
 - converter 现在要求 audit 根目录与输入一致、逐 HDF5 SHA-256 一致、所有候选均通过或可迁移且目录中没有未审计 HDF5；全量预检通过后才在临时目录构建，成功后原子替换旧输出。训练入口固定保护 dataset/checkpoint/output 参数，并强制检查 `0.8 m` canonical stop、可见 stop、统一 `12 mm` 相机和精确 29 条 episode。
 - 启动前复核又补齐了 fail-closed 门禁：批采不再只看进程退出码，而是逐条要求 `success=true`、`smolvla_eligible=true`、无审计错误、`12 mm` 相机、`0.8 m` stop、`0.02 m` 最终滞回和完整 20 帧可见 stop tail。整批、converter 和训练入口三层都要求精确 29 个预期 scenario ID 以及 8 场景/12 物体/24 模板覆盖；converter 与采集共用排他锁，并绑定首次读取的 audit 哈希，避免并发更新污染 manifest。
+- 首次重采 `train_0000` 在第 124 帧严格进入 `0.8 m`，最低/最终距离 `0.7487/0.8074 m`、最终速度 `0.00026 m/s`，但停稳后的物理回弹使严格 `0.8 m` 保持计数只有 `67/100`，因此被新门禁正确拒绝。修复后首次到达和 stop 标签仍只在 `<=0.8 m` 锁存，但已停车的稳定保持使用 `<=0.82 m` 滞回外半径。覆盖重采后该条以 `192/100` 保持通过，`success=true`、姿态通过、无跌倒；stop 首帧与 canonical 首次到达同为第 124 帧，零标签错位、零 stop/运动冲突、20 帧 stop tail 全可见，H.264 视频 320 帧完整解码。
 
 ## 待办路线
 
