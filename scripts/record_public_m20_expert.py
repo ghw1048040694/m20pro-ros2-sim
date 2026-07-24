@@ -78,6 +78,12 @@ parser.add_argument("--nav-turn-threshold", type=float, default=1.57)
 parser.add_argument("--nav-command-hold-steps", type=int, default=1)
 parser.add_argument("--nav-fixed-turn-steps", type=int, default=0, help="Use a fixed turn skill before forward; zero keeps bearing control.")
 parser.add_argument("--success-radius", type=float, default=0.8)
+parser.add_argument(
+    "--success-final-tolerance",
+    type=float,
+    default=0.02,
+    help="Final-position hysteresis after holding inside the success radius.",
+)
 parser.add_argument("--nav-slow-radius", type=float, default=1.8)
 parser.add_argument("--nav-min-distance-scale", type=float, default=0.15, help="Minimum approach speed fraction before entering the success radius.")
 parser.add_argument("--nav-wheel-acceleration", type=float, default=18.0, help="Maximum wheel-target slew rate in rad/s^2.")
@@ -94,7 +100,7 @@ parser.add_argument(
     "--stop-pretrigger-radius",
     type=float,
     default=0.0,
-    help="Begin velocity-based wheel braking before success radius; zero disables pre-braking.",
+    help="Legacy compatibility field; canonical stop labels always use --success-radius.",
 )
 parser.add_argument("--stop-speed-threshold", type=float, default=0.08)
 parser.add_argument("--stop-confirm-steps", type=int, default=10)
@@ -168,7 +174,7 @@ parser.add_argument(
 parser.add_argument(
     "--camera-focal-length",
     type=float,
-    default=18.0,
+    default=12.0,
     help="Pinhole focal length in mm; lower values widen the ObjectNav field of view.",
 )
 parser.add_argument("--video", action="store_true", help="Required: write one MP4 per episode.")
@@ -370,6 +376,8 @@ if args.nav_fixed_turn_steps < 0:
     parser.error("--nav-fixed-turn-steps must be non-negative")
 if args.success_radius <= 0.0 or args.nav_slow_radius <= args.success_radius:
     parser.error("--nav-slow-radius must be greater than the positive --success-radius")
+if args.success_final_tolerance < 0.0:
+    parser.error("--success-final-tolerance must be non-negative")
 if not 0.0 < args.nav_min_distance_scale <= 1.0:
     parser.error("--nav-min-distance-scale must be in (0, 1]")
 if args.nav_wheel_acceleration <= 0.0 or args.nav_wheel_yaw_gain <= 0.0 or args.stop_wheel_damping <= 0.0:
@@ -1175,6 +1183,7 @@ def main() -> None:
             "max_yaw": args.nav_max_yaw, "turn_threshold": args.nav_turn_threshold,
             "command_hold_steps": args.nav_command_hold_steps, "fixed_turn_steps": args.nav_fixed_turn_steps,
             "success_radius": args.success_radius, "slow_radius": args.nav_slow_radius,
+            "success_final_tolerance": args.success_final_tolerance,
             "min_distance_scale": args.nav_min_distance_scale,
             "wheel_acceleration": args.nav_wheel_acceleration, "wheel_yaw_gain": args.nav_wheel_yaw_gain,
             "stop_wheel_damping": args.stop_wheel_damping, "turn_wheel_damping": TURN_WHEEL_DAMPING,
@@ -1435,6 +1444,8 @@ def main() -> None:
             h5.attrs["stop_after"] = -1 if args.stop_after is None else args.stop_after
             h5.attrs["stop_on_target"] = args.stop_on_target
             h5.attrs["navigate_to_target"] = args.navigate_to_target
+            h5.attrs["success_radius"] = args.success_radius
+            h5.attrs["success_final_tolerance"] = args.success_final_tolerance
             h5.attrs["target_color"] = args.target_color
             h5.attrs["target_xy"] = np.asarray([args.target_x, args.target_y], dtype=np.float32)
             h5.attrs["initial_xy"] = np.asarray([args.initial_x, args.initial_y], dtype=np.float32)
@@ -1504,7 +1515,6 @@ def main() -> None:
             h5.attrs["dagger_skill_expert_probability"] = args.dagger_skill_expert_probability
             for step in range(args.steps):
                 target_in_range = False
-                pretrigger_active = False
                 if TARGET_PRESENT:
                     target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
                     target_distance_now = float(torch.linalg.vector_norm(target_delta).item())
@@ -1512,12 +1522,6 @@ def main() -> None:
                     if target_in_range and not target_reached:
                         target_reached = True
                         target_reached_step = step
-                    pretrigger_active = bool(
-                        args.navigate_to_target
-                        and not target_reached
-                        and args.stop_pretrigger_radius > 0.0
-                        and target_distance_now <= args.stop_pretrigger_radius
-                    )
                 if args.navigate_to_target:
                     if args.nav_fixed_turn_steps > 0 and step < args.nav_fixed_turn_steps and not target_reached:
                         cached_navigation_command = (0.0, 0.0, target_turn_sign * args.nav_max_yaw)
@@ -1977,7 +1981,7 @@ def main() -> None:
                                 expert_command[0],
                                 expert_command[1],
                                 expert_command[2],
-                                float(target_reached or pretrigger_active),
+                                float(target_reached),
                                 0.0,
                                 0.0,
                             ],
@@ -1991,7 +1995,7 @@ def main() -> None:
                             expert_command[0],
                             expert_command[1],
                             expert_command[2],
-                            float(stop_now or target_reached or pretrigger_active),
+                            float(stop_now or target_reached),
                             0.0,
                             0.0,
                         ],
@@ -2119,7 +2123,8 @@ def main() -> None:
                 )
                 command_ok = (
                     target_reached and final_target_distance is not None
-                    and final_target_distance <= args.success_radius + 0.1 and final_planar_speed < 0.15
+                    and final_target_distance <= args.success_radius + args.success_final_tolerance
+                    and final_planar_speed < 0.15
                     and effective_stop_latched
                     and max_post_stop_target_hold_steps >= args.target_hold_steps
                 )
@@ -2219,7 +2224,8 @@ def main() -> None:
             )
             command_ok = (
                 target_reached and final_target_distance is not None
-                and final_target_distance <= args.success_radius + 0.1 and final_planar_speed < 0.15
+                and final_target_distance <= args.success_radius + args.success_final_tolerance
+                and final_planar_speed < 0.15
                 and effective_stop_latched
                 and max_post_stop_target_hold_steps >= args.target_hold_steps
             )

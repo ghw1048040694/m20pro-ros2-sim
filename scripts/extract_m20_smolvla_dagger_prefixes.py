@@ -83,16 +83,24 @@ def extract(path: Path, output_root: Path, args: argparse.Namespace) -> dict:
             raise ValueError(
                 f"Usable prefix too short ({prefix_frames} < {args.minimum_frames}): {path}"
             )
-        stop_frames = int(
-            np.count_nonzero(
-                np.asarray(source["high_level_action"][:prefix_frames, 3]) > 0.5
-            )
-        )
+        target_xy = np.asarray(source.attrs["target_xy"], dtype=np.float32)
+        success_radius = float(source.attrs.get("success_radius", 0.8))
+        target_distance = np.linalg.norm(state[:prefix_frames, :2] - target_xy, axis=1)
+        canonical_stop = np.maximum.accumulate(target_distance <= success_radius)
+        stop_indices = np.flatnonzero(canonical_stop)
+        target_reached = bool(len(stop_indices))
+        target_reached_step = int(stop_indices[0]) if target_reached else -1
+        stop_frames = int(canonical_stop.sum())
 
         output_name = f"episode_dagger_{path.parent.name}_{path.stem.removeprefix('episode_')}.h5"
         output_path = output_root / output_name
         with h5py.File(output_path, "w") as destination:
             copy_prefix(source, destination, source_frames, prefix_frames)
+            high_level_action = np.asarray(
+                destination["high_level_action"], dtype=np.float32
+            )
+            high_level_action[:, 3] = canonical_stop.astype(np.float32)
+            destination["high_level_action"][:] = high_level_action
             for key, value in source.attrs.items():
                 destination.attrs[key] = value
             destination.attrs["smolvla_dagger_partial"] = True
@@ -103,8 +111,12 @@ def extract(path: Path, output_root: Path, args: argparse.Namespace) -> dict:
             destination.attrs["smolvla_dagger_unsafe_cut"] = unsafe_cut
             destination.attrs["success"] = False
             destination.attrs["command_ok"] = False
-            destination.attrs["target_reached"] = False
-            destination.attrs["target_reached_step"] = -1
+            destination.attrs["target_reached"] = target_reached
+            destination.attrs["target_reached_step"] = target_reached_step
+            destination.attrs["success_radius"] = success_radius
+            destination.attrs["stop_label_policy_version"] = (
+                "target_radius_latched_v1"
+            )
             destination.attrs["terminated_steps"] = 0
             destination.attrs["min_root_height"] = float(root_height[:prefix_frames].min())
             destination.attrs["max_root_height"] = float(root_height[:prefix_frames].max())
@@ -123,6 +135,9 @@ def extract(path: Path, output_root: Path, args: argparse.Namespace) -> dict:
         "unsafe_cut": unsafe_cut,
         "minimum_root_height": float(root_height[:prefix_frames].min()),
         "stop_frames": stop_frames,
+        "target_reached": target_reached,
+        "target_reached_step": target_reached_step,
+        "success_radius_m": success_radius,
     }
 
 

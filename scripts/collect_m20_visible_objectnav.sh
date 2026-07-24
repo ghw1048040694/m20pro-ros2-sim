@@ -23,7 +23,7 @@ case "${EPISODE_ID}" in
     ;;
 esac
 
-DATASET_VERSION="${M20PRO_OBJECTNAV_DATASET_VERSION:-v2}"
+DATASET_VERSION="${M20PRO_OBJECTNAV_DATASET_VERSION:-v4_stop08_source}"
 OUTPUT_DIR="${DATA_ROOT}/datasets/m20_visible_objectnav_${DATASET_VERSION}/${SPLIT}"
 VIDEO_DIR="${DATA_ROOT}/videos/m20_visible_objectnav_${DATASET_VERSION}/${SPLIT}"
 if [[ -e "${OUTPUT_DIR}/episode_${EPISODE_ID}.h5" && "${M20PRO_OVERWRITE:-0}" != "1" ]]; then
@@ -39,8 +39,11 @@ exec "${SCRIPT_DIR}/record_public_m20_expert.sh" \
   --warmup-steps 75 \
   --nav-forward-speed 0.45 \
   --nav-wheel-acceleration 12.0 \
+  --success-radius 0.8 \
+  --success-final-tolerance 0.02 \
+  --camera-focal-length 12.0 \
   --stop-yaw-brake-gain 0.0 \
-  --stop-pretrigger-radius 1.20 \
+  --stop-pretrigger-radius 0.0 \
   --stop-speed-threshold 0.15 \
   --stop-confirm-steps 5 \
   --target-hold-steps 100 \

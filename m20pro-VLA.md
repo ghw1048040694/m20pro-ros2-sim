@@ -1,6 +1,6 @@
 # M20 Pro VLA 具身智能仿真项目记录
 
-Last updated: 2026-07-24 CST
+Last updated: 2026-07-24 17:15 CST
 
 ## 项目边界
 
@@ -598,17 +598,28 @@ python scripts/play_m20_vla_skill.py --headless --video \
 - 补齐 v5 `train_0000/0009/0027/0073` 后，四条姿态均通过、目标均曾进入半径，但完整任务只有 `1/4`。三个失败场景都在第 `220` 帧形成连续 stop 证据，距离目标仍为 `0.478-0.666 m`；固定再前进 `60` 帧才锁停会把机器人带离目标，是确定的后处理语义错误。
 - v6 改为 4 个 flow-matching 样本至少 2 票、连续 2 次查询后立即服从模型 stop，删除固定 approach，并把 `smolvla_stop_armed_step` 写入 HDF5/JSON。低画质运行的 8 条初步结果为：训练 `4/4`、验证 `1/2`、可见测试 `0/2`、合并 holdout `1/4`，姿态 `8/8`、false stop `3`，全部视频可解码。汇总器已按 `train/validation/test_visible` 分组，避免总体成功率掩盖泛化失败。
 - 随后确认低画质预设中的阴影/反射等 RTX 开关是全局设置，虽然相机和 MP4 分辨率不变，像素分布仍可能改变。回放入口现已分流：有头人工展示使用 `960x540` 低画质；正式 `--headless` 测试保留训练时渲染设置且不创建窗口。v6 低画质数字保留为诊断，不作为最终泛化指标。
-- 原始传感器画质 v7 当前完成 4 条：`train_0000` 成功，最终 `0.4994 m`；`validation_0000` 成功，最终 `0.5824 m`；`validation_0009` 失败，最小/最终 `1.2476/1.7358 m`；`test_visible_0004` 失败，第 `130` 帧在 `0.8373 m` 处形成 false stop，最终 `0.8636 m`。四条姿态均通过。单条 320 帧本机 wall-clock 为 `200.66-208.59 s`，均值约 `205.75 s`。
+- 原始传感器画质 v7 已完成 9 条正式回放，汇总位于 `logs/m20_smolvla_objectnav_replay_v7_full_render_benchmark_summary.json`：总体 `5/9`，训练 `4/4`，验证 `1/2`，可见测试 `0/3`，合并 holdout `1/5`；false stop 为 `4`，姿态 `9/9`，跌倒 `0`，learner-only 与 320 帧 H.264 视频门禁均为 `9/9`。`test_visible_0011` 最小/最终距离 `1.5636/1.9521 m`，第 `220` 帧 false stop。该 checkpoint 的 visible ObjectNav 泛化门禁明确失败。
 - 曾按用户建议准备服务器 `genghaowei@192.168.3.136`：最小运行集 `3.7 GB` 位于 `/private/genghaowei/M20ProVLA_server`，模型与 HF 大文件 SHA-256 一致，Python/Isaac/SmolVLA 导入通过。但账号无 `/dev/dri` 的 video/render 权限，带相机 rendering experience 在首帧前崩溃，随后四张 4090 又均被其他用户占用；未取得有效服务器 episode 或加速倍数。用户决定暂不使用服务器，后续继续本机顺序测试。
+
+### v4 stop 语义修复与本地重训准备（2026-07-24 16:30）
+
+- 对 v3 的 `3330` 个训练帧做了几何复核：`582` 个 stop 正样本中有 `580` 个位于 `0.8 m` 成功半径之外，并同时带有非零前进命令；29 条 expert episode 的首 stop 距离为 `1.159-1.200 m`。根因是采集包装器设置 `stop_pretrigger_radius=1.20`，采集器又把 pretrigger 当成语义 stop。
+- 旧 converter 从源数据首 stop 后只保留 20 帧，因此恰好裁掉了真正进入 `0.8 m` 的监督。现在 converter 先用 pre-action `state[:2]` 与 `target_xy` 生成 `distance<=0.8` 的锁存 stop，再执行 tail 裁剪；目标坐标只用于离线监督修复，策略输入仍只有双目 RGB、机身状态和 LiDAR。
+- 采集端 stop 标签已改为只服从 `target_reached`，wrapper 显式使用 `success_radius=0.8`、禁用 legacy pretrigger；语义 stop 仍严格锁存于 `success_radius`，只在最终静止成功判定中使用显式 `0.02 m` 物理滞回。DAgger prefix 会按同一半径重算 stop 与 reached 元数据；源数据审计会阻止带早停/stop+运动冲突的数据直接训练，同时允许 canonical converter 做受控迁移。
+- 第一版重标数据集 `datasets/m20_visible_objectnav_lerobot_v4_stop08` 曾生成 `34` 条、`4168` 帧并修正 `838` 个提前 stop，但新增可观测性审计发现：`582` 个 retained stop 帧中有 `270` 个前后相机均看不到目标，30 条含 stop 的 episode 中有 8 条在 canonical 首 stop 当帧目标不可见。该数据集现已否决，只保留作诊断，不允许进入训练。
+- 相机 A/B 使用最差的 `train_0027` 验证了修复方向：焦距由 `18 mm` 降到 `12 mm` 后，首次进入 `0.8 m` 时的目标像素占比从 `0` 提升到 `7.22%`，20 个 stop tail 帧全部可见。stop 标签仍严格从 `0.8 m` 开始；最终静止位置只增加显式 `2 cm` 物理滞回，处理已在半径内稳定保持 100 帧后约 `4 mm` 的数值漂移，不恢复旧的 `10 cm` 宽松门限。
+- converter 现在要求 audit 根目录与输入一致、逐 HDF5 SHA-256 一致、所有候选均通过或可迁移且目录中没有未审计 HDF5；全量预检通过后才在临时目录构建，成功后原子替换旧输出。训练入口固定保护 dataset/checkpoint/output 参数，并强制检查 `0.8 m` canonical stop、可见 stop、统一 `12 mm` 相机和精确 29 条 episode。
+- 启动前复核又补齐了 fail-closed 门禁：批采不再只看进程退出码，而是逐条要求 `success=true`、`smolvla_eligible=true`、无审计错误、`12 mm` 相机、`0.8 m` stop、`0.02 m` 最终滞回和完整 20 帧可见 stop tail。整批、converter 和训练入口三层都要求精确 29 个预期 scenario ID 以及 8 场景/12 物体/24 模板覆盖；converter 与采集共用排他锁，并绑定首次读取的 audit 哈希，避免并发更新污染 manifest。
 
 ## 待办路线
 
-1. 用原始传感器画质补跑 `train_0009/0027/0073` 与 `test_visible_0000/0011`，生成按 split 分组的新汇总；低画质 v6 结果不混入最终指标。
-2. 当前 holdout 已出现“目标仍在 `0.84-1.25 m` 即 stop”以及不转向两类失败；统一训练标签与 `0.8 m` 成功语义并重新训练，不用目标位姿或继续堆场景特定阈值掩盖问题。
-3. 新 checkpoint 再扩展到至少 `20` 条未参与训练的 visible ObjectNav episode，报告成功率、姿态通过率、跌倒率、false-stop、失败类型和逐 episode 视频。
-4. 增加同场景多物体与指令互换的反事实语言门禁，并在 manifest 入口之外接入运行时文本参数；语音只作为语音转文字前端，VLA 核心继续接收文本。
-5. 然后加入目标位于侧后方、被遮挡和跨房间的成功轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。
-6. 接入可验证的公开四足 parkour checkpoint。若没有 M20 的 1 m 障碍专家，由于项目仅做仿真且不要求沿用 M20 动力学，切换到有公开 checkpoint 的 Go1/ANYmal 仿真资产完成 parkour 分支，不再用失败关节序列冒充 jump 数据。
+1. 用统一 `12 mm` 相机、canonical `0.8 m` stop 和 `2 cm` 最终静止滞回，在本机重采 29 条干净 expert episode；只有 stop tail 全部可见、哈希绑定审计和 8 场景/12 物体/24 模板门禁全通过才转换为 v5 数据集。
+2. 在本机从原始 SmolVLA base 训练 v5 camera12-stop08 checkpoint；使用显式短 warmup 和覆盖完整训练长度的 decay，不从带早停偏置的 v2/v3 checkpoint 续训。
+3. 先做离线动作/stop 门禁，再用同一 `12 mm` 原始传感器画质复跑训练、验证和可见测试场景，继续保留逐 episode H.264 视频；只有 holdout 明显超过当前 `1/5` 才扩展测试规模。
+4. 新 checkpoint 扩展到至少 `20` 条未参与训练的 visible ObjectNav episode，报告成功率、姿态通过率、跌倒率、false-stop、失败类型和逐 episode 视频。
+5. 增加同场景多物体与指令互换的反事实语言门禁，并在 manifest 入口之外接入运行时文本参数；语音只作为语音转文字前端，VLA 核心继续接收文本。
+6. 然后加入目标位于侧后方、被遮挡和跨房间的成功轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。
+7. 接入可验证的公开四足 parkour checkpoint。若没有 M20 的 1 m 障碍专家，由于项目仅做仿真且不要求沿用 M20 动力学，切换到有公开 checkpoint 的 Go1/ANYmal 仿真资产完成 parkour 分支，不再用失败关节序列冒充 jump 数据。
 
 ### 并行环境容量基准
 

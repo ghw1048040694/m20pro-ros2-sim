@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from collections import Counter
@@ -29,7 +30,7 @@ REQUIRED_DATASETS = (
     "terminated",
 )
 V2_PROPRIO_DATASET = "observation/smolvla_proprio"
-HOLDOUT_MARKERS = ("eval", "holdout", "test")
+HOLDOUT_MARKERS = ("eval", "holdout", "test", "validation")
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lidar-max-range", type=float, default=20.0)
     parser.add_argument("--lidar-return-margin", type=float, default=0.1)
+    parser.add_argument("--stop-tail-frames", type=int, default=20)
     return parser.parse_args()
 
 
@@ -70,11 +72,34 @@ def is_holdout(path: Path) -> bool:
     return any(marker in lowered for marker in HOLDOUT_MARKERS)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
     relative_path = str(path.relative_to(root))
-    result = {"path": relative_path, "errors": [], "warnings": []}
+    result = {
+        "path": relative_path,
+        "sha256": sha256_file(path),
+        "errors": [],
+        "warnings": [],
+    }
     with h5py.File(path, "r") as h5:
         attrs = {key: json_value(value) for key, value in h5.attrs.items()}
+        result.update(
+            {
+                "scenario_episode_id": attrs.get("scenario_episode_id"),
+                "camera_focal_length_mm": attrs.get("camera_focal_length"),
+                "camera_pitch_deg": attrs.get("camera_pitch_deg"),
+                "success_final_tolerance_m": attrs.get(
+                    "success_final_tolerance"
+                ),
+            }
+        )
         smolvla_candidate = bool(attrs.get("smolvla_candidate", False))
         missing = [key for key in REQUIRED_DATASETS if key not in h5]
         result["errors"].extend(f"missing_dataset:{key}" for key in missing)
@@ -181,6 +206,16 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
             result["errors"].append("missing_high_level_action_label")
 
         high_level_action_valid = False
+        stop_semantics_valid = True
+        success_radius = float(attrs.get("success_radius", 0.8))
+        pre_action_first_inside_frame = -1
+        source_first_stop_frame = -1
+        first_stop_distance_m = None
+        stop_before_first_inside_frames = 0
+        stop_motion_conflict_frames = 0
+        stop_label_mismatch_frames = 0
+        canonical_stop_invisible_frames = 0
+        canonical_retained_stop_frames = 0
         if "high_level_action" in h5:
             high_level_action = np.asarray(h5["high_level_action"], dtype=np.float32)
             high_level_action_valid = bool(
@@ -191,6 +226,131 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 result["errors"].append("invalid_high_level_action")
         elif smolvla_candidate:
             result["errors"].append("missing_high_level_action")
+
+        if (
+            smolvla_candidate
+            and str(attrs.get("task_type")) == "visible_object_navigation"
+            and high_level_action_valid
+        ):
+            if "success_radius" not in attrs:
+                result["warnings"].append("missing_success_radius_assumed_0_8")
+            target_xy = np.asarray(attrs.get("target_xy", []), dtype=np.float32)
+            if not np.isfinite(success_radius) or not np.isclose(
+                success_radius, 0.8, rtol=0.0, atol=1.0e-6
+            ):
+                result["errors"].append("unsupported_success_radius")
+                stop_semantics_valid = False
+            elif target_xy.shape != (2,) or not np.isfinite(target_xy).all():
+                result["errors"].append("missing_target_xy_for_stop_semantics")
+                stop_semantics_valid = False
+            elif state.ndim != 2 or state.shape[1] < 2:
+                result["errors"].append("invalid_state_for_stop_semantics")
+                stop_semantics_valid = False
+            else:
+                target_distance = np.linalg.norm(state[:, :2] - target_xy, axis=1)
+                inside_indices = np.flatnonzero(target_distance <= success_radius)
+                stop_mask = high_level_action[:, 3] > 0.5
+                stop_indices = np.flatnonzero(stop_mask)
+                canonical_stop = np.maximum.accumulate(
+                    target_distance <= success_radius
+                )
+                pre_action_first_inside_frame = (
+                    int(inside_indices[0]) if len(inside_indices) else -1
+                )
+                source_first_stop_frame = (
+                    int(stop_indices[0]) if len(stop_indices) else -1
+                )
+                first_stop_distance_m = (
+                    float(target_distance[source_first_stop_frame])
+                    if source_first_stop_frame >= 0
+                    else None
+                )
+                if pre_action_first_inside_frame >= 0:
+                    stop_before_first_inside_frames = int(
+                        np.count_nonzero(
+                            stop_mask[:pre_action_first_inside_frame]
+                        )
+                    )
+                else:
+                    stop_before_first_inside_frames = int(stop_mask.sum())
+                stop_motion_conflict_frames = int(
+                    np.count_nonzero(
+                        stop_mask
+                        & (np.linalg.norm(high_level_action[:, :3], axis=1) > 1.0e-4)
+                    )
+                )
+                stop_label_mismatch_frames = int(
+                    np.count_nonzero(stop_mask != canonical_stop)
+                )
+                if (
+                    "observation/front_target_pixel_fraction" in h5
+                    and "observation/rear_target_pixel_fraction" in h5
+                ):
+                    front_fraction = np.asarray(
+                        h5["observation/front_target_pixel_fraction"],
+                        dtype=np.float32,
+                    )
+                    rear_fraction = np.asarray(
+                        h5["observation/rear_target_pixel_fraction"],
+                        dtype=np.float32,
+                    )
+                    visibility = np.maximum(front_fraction, rear_fraction)
+                    canonical_indices = np.flatnonzero(canonical_stop)
+                    retained_canonical_stop = np.zeros_like(canonical_stop)
+                    if len(canonical_indices):
+                        first_canonical = int(canonical_indices[0])
+                        retained_canonical_stop[
+                            first_canonical : first_canonical + args.stop_tail_frames
+                        ] = True
+                    canonical_retained_stop_frames = int(
+                        np.count_nonzero(retained_canonical_stop)
+                    )
+                    canonical_stop_invisible_frames = int(
+                        np.count_nonzero(
+                            retained_canonical_stop & (visibility <= 1.0e-4)
+                        )
+                    )
+                if stop_before_first_inside_frames:
+                    result["errors"].append("stop_label_before_success_radius")
+                if stop_motion_conflict_frames:
+                    result["errors"].append("stop_motion_conflict")
+                if stop_label_mismatch_frames:
+                    result["errors"].append("stop_label_not_canonical")
+                if canonical_stop_invisible_frames:
+                    result["errors"].append(
+                        "canonical_stop_without_visible_target"
+                    )
+                if (
+                    success
+                    and canonical_retained_stop_frames != args.stop_tail_frames
+                ):
+                    result["errors"].append("incomplete_canonical_stop_tail")
+                if success and pre_action_first_inside_frame < 0:
+                    result["errors"].append(
+                        "successful_episode_missing_pre_action_reach"
+                    )
+                if success and pre_action_first_inside_frame >= 0 and not len(stop_indices):
+                    result["errors"].append("successful_episode_missing_stop_label")
+                if smolvla_dagger_partial and bool(
+                    attrs.get("target_reached", False)
+                ) != (pre_action_first_inside_frame >= 0):
+                    result["errors"].append(
+                        "dagger_partial_target_metadata_mismatch"
+                    )
+                stop_semantics_valid = not any(
+                    error
+                    in {
+                        "stop_label_before_success_radius",
+                        "stop_motion_conflict",
+                        "successful_episode_missing_stop_label",
+                        "dagger_partial_target_metadata_mismatch",
+                        "stop_label_not_canonical",
+                        "canonical_stop_without_visible_target",
+                        "incomplete_canonical_stop_tail",
+                        "successful_episode_missing_pre_action_reach",
+                    }
+                    for error in result["errors"]
+                )
 
         required_candidate_attrs = (
             "scene_id",
@@ -251,16 +411,22 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 stop_mask = np.asarray(h5["high_level_action"], dtype=np.float32)[:, 3] > 0.5
                 stop_indices = np.flatnonzero(stop_mask)
                 first_stop = int(stop_indices[0]) if len(stop_indices) else -1
+                retained_source_stop = np.zeros_like(stop_mask)
+                if first_stop >= 0:
+                    retained_source_stop[
+                        first_stop : first_stop + args.stop_tail_frames
+                    ] = stop_mask[first_stop : first_stop + args.stop_tail_frames]
                 stop_visibility_valid = bool(
                     (smolvla_dagger_partial and first_stop < 0)
                     or (
                         first_stop > 0
-                        and visibility[first_stop] > 1.0e-4
-                        and np.max(visibility[max(0, first_stop - 4) : first_stop + 1]) > 1.0e-4
+                        and bool(
+                            np.all(visibility[retained_source_stop] > 1.0e-4)
+                        )
                     )
                 )
                 if not stop_visibility_valid:
-                    result["errors"].append("stop_label_begins_after_target_leaves_camera")
+                    result["errors"].append("stop_label_without_visible_target")
 
         temporal_alignment_valid = (
             explicit_timestamps and sensor_alignment == "pre_action"
@@ -273,7 +439,27 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
             and not missing_candidate_attrs
             and str(attrs.get("lidar_mesh_scope", "")) != "ground_only"
             and target_visibility_valid
+            and stop_semantics_valid
             and not result["errors"]
+        )
+        stop_migration_errors = {
+            "stop_label_before_success_radius",
+            "stop_motion_conflict",
+            "successful_episode_missing_stop_label",
+            "dagger_partial_target_metadata_mismatch",
+            "stop_label_not_canonical",
+            "stop_label_without_visible_target",
+        }
+        smolvla_stop_migration_eligible = bool(
+            smolvla_candidate
+            and train_eligible
+            and temporal_alignment_valid
+            and high_level_action_valid
+            and not missing_candidate_attrs
+            and str(attrs.get("lidar_mesh_scope", "")) != "ground_only"
+            and target_visibility_valid
+            and bool(result["errors"])
+            and set(result["errors"]).issubset(stop_migration_errors)
         )
 
         result.update(
@@ -287,6 +473,9 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 "train_eligible": train_eligible and not result["errors"],
                 "smolvla_candidate": smolvla_candidate,
                 "smolvla_eligible": smolvla_eligible,
+                "smolvla_stop_migration_eligible": (
+                    smolvla_stop_migration_eligible
+                ),
                 "dagger": bool(attrs.get("dagger", False)),
                 "smolvla_dagger_labels": smolvla_dagger_labels,
                 "smolvla_dagger_partial": smolvla_dagger_partial,
@@ -301,6 +490,22 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
                 "stop_visibility_valid": stop_visibility_valid,
                 "smolvla_state_schema_valid": state_schema_valid,
                 "target_reached": bool(attrs.get("target_reached", False)),
+                "success_radius_m": success_radius,
+                "stop_semantics_valid": stop_semantics_valid,
+                "source_first_stop_frame": source_first_stop_frame,
+                "pre_action_first_inside_frame": pre_action_first_inside_frame,
+                "first_stop_distance_m": first_stop_distance_m,
+                "stop_before_first_inside_frames": (
+                    stop_before_first_inside_frames
+                ),
+                "stop_motion_conflict_frames": stop_motion_conflict_frames,
+                "stop_label_mismatch_frames": stop_label_mismatch_frames,
+                "canonical_stop_invisible_frames": (
+                    canonical_stop_invisible_frames
+                ),
+                "canonical_retained_stop_frames": (
+                    canonical_retained_stop_frames
+                ),
                 "scene_id": attrs.get("scene_id"),
                 "obstacle_height_m": attrs.get("obstacle_height_m"),
                 "command_source": command_source,
@@ -324,6 +529,8 @@ def inspect_episode(path: Path, root: Path, args: argparse.Namespace) -> dict:
 
 def main() -> None:
     args = parse_args()
+    if args.stop_tail_frames <= 0:
+        raise ValueError("--stop-tail-frames must be positive")
     paths = sorted(args.input_root.rglob("*.h5"))
     if not paths:
         raise FileNotFoundError(f"No HDF5 episodes found under {args.input_root}")
@@ -350,6 +557,11 @@ def main() -> None:
     candidates = [episode for episode in episodes if episode.get("smolvla_candidate", False)]
     smolvla_eligible = [
         episode for episode in episodes if episode.get("smolvla_eligible", False)
+    ]
+    stop_migration_eligible = [
+        episode
+        for episode in episodes
+        if episode.get("smolvla_stop_migration_eligible", False)
     ]
     train_candidates = [
         episode for episode in candidates if episode.get("split") == "train"
@@ -448,6 +660,9 @@ def main() -> None:
             "smolvla_eligible_frames": sum(
                 int(episode["frames"]) for episode in smolvla_eligible
             ),
+            "smolvla_stop_migration_eligible_episodes": len(
+                stop_migration_eligible
+            ),
             "dagger_train_episodes": sum(
                 bool(episode.get("dagger") or episode.get("smolvla_dagger_labels"))
                 for episode in eligible
@@ -475,6 +690,7 @@ def main() -> None:
             "A range return does not prove obstacle visibility; obstacle annotations and scene geometry are required.",
             "Legacy files without sensor_alignment were written by a recorder that stored RGB/LiDAR before action and state after action.",
             "Only files explicitly marked smolvla_candidate participate in new fine-tuning readiness gates.",
+            "Legacy stop-label errors are excluded from direct training but may be repaired by the canonical converter when smolvla_stop_migration_eligible is true.",
         ],
         "episodes": episodes,
     }
