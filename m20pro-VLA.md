@@ -573,17 +573,27 @@ python scripts/play_m20_vla_skill.py --headless --video \
 ### SmolVLA ensemble 闭环与首条 holdout（2026-07-24）
 
 - 回放改为每次查询执行 `4` 个可复现 flow-matching 样本：连续动作取均值后平滑、限幅，stop 使用 ensemble 投票；HDF5 同时保存 stop score、votes 和实际执行命令。验收仍为 learner-only，不启用 DAgger、目标位姿制动或专家干预。
-- `train_0000/0009/0027/0073` 四条训练分布内可见目标场景已从 `0/4` 提升为严格成功 `4/4`：跌倒 `0`、false stop `0`、四条视频全部通过；最终目标距离分别为 `0.4374/0.2969/0.3392/0.4243 m`，最低根高均不低于 `0.4146 m`。汇总为 `logs/m20_smolvla_objectnav_replay_v4_ensemble4_summary.json`。
+- `train_0000/0009/0027/0073` 曾按“到达、停车、未触发 fall”口径得到 `4/4`，但用户视频复核发现初始强烈抖动、机身低趴且左前腿不能正常承重。该 `4/4` 结论现已撤销：旧指标没有检查横滚、角速度、腿对称性和关节目标跳变，不能称为严格成功。
 - 该 `4/4` 只能证明训练场景回放闭环通过，不能证明泛化。首条未参与训练的 `validation_0000` 严格失败：无跌倒，最小/最终目标距离 `1.0362/1.0778 m`，第 `110` 步 learner stop latch，未进入 `0.8 m` 成功半径。
 - 失败根因是 stop 监督从约 `1.2 m` 开始，而专家仍继续慢速接近至 `0.8 m`；旧回放把 stop 预测直接解释为立即停车，导致 holdout 提前制动。当前正在加入两阶段 stop 状态机：连续确认后先进入 `60` 帧、最大前进速度 `0.18 m/s` 的受限 approach，再锁定停车。该逻辑不读取目标位姿。
 - 截至本次状态核对，approach 主逻辑、实际执行命令记录和参数 HDF5 attrs 已进入未提交工作树，但 episode JSON/armed-step 诊断、回放脚本显式参数和新的 holdout 回放尚未全部完成，不能把修复写成已通过。当前无 Isaac Sim、训练或回放进程运行。
 - 下一门禁是先重跑 `validation_0000`，再跑 `validation_0009`、`test_visible_0004`、`test_visible_0011`；之后扩展到至少 `20` 条 holdout 并汇总成功率。隐藏目标搜索、place navigation 和 `1 m` 障碍跳跃仍未开始。
 
+### 启动抖动与左前腿姿态修复（2026-07-24）
+
+- 原始 HDF5 证明异常在 VLA 第一个动作之前已经发生：旧回放首帧横滚约 `7.8-8.6 deg`，机身角速度约 `9.7-10.0 rad/s`。根因是 recorder 的 warmup 只在每个 `50 Hz` 控制帧开始写一次显式 PD 力，后续三个 `200 Hz` PhysX 子步沿用过期力矩；原始稳定回放则在每个物理子步重新计算并写力。
+- warmup 已改为每个 `5 ms` 物理子步执行 `scene.write_data_to_sim()`。对照 `train_0000` 的 80 帧低层 smoke：最低根高 `0.5148 m`、高度标准差 `0.0008 m`、最大横滚 `0.69 deg`、启动最大角速度 `0.177 rad/s`、启动腿对称误差 `0.105 rad`，`posture_ok=true`。
+- SmolVLA 回放入口默认使用与公开 ONNX 更一致的官方 MJCF USD，恢复公开策略的完整 `16` 维腿轮协同输出；会破坏腿轮同步的几何轮速覆盖和室内隐式轮速驱动不再作为回放默认值。几何覆盖仍保留为专家数据兼容/诊断选项。
+- 停车不再运行已证实不稳定的“零速度 ONNX”动作，而是切换到对称默认站姿并锁轮；制动确认期间保持最后一帧稳定腿目标。HDF5/JSON 新增启动横滚俯仰、角速度、根高方差、腿对称误差和关节目标跳变，`success` 现在必须同时通过 `startup_posture_ok` 与 `posture_ok`。
+- 修复后的完整 learner-only `train_0000` 已通过：第 `116` 帧进入 `0.8 m` 半径，第 `170` 帧 SmolVLA stop latch，保持 `150` 帧；最小/最终距离 `0.1740/0.1948 m`，最终速度 `0.00091 m/s`，最低根高 `0.5148 m`、最大横滚 `0.50 deg`、启动最大角速度 `0.102 rad/s`、最终腿对称误差 `0.0066 rad`，`terminated_steps=0`、`posture_ok=true`、`success=true`。
+- 新视频位于 `videos/smolvla_objectnav_replay_v5_posture/train_0000/episode_train_0000.mp4`，H.264 已完整解码。它只恢复一条训练分布内场景的姿态有效性；`train_0009/0027/0073` 和 holdout 尚未按新门禁重跑，不能恢复旧的 `4/4` 或宣称泛化成功。
+- 图形回放新增低负载预设：交互视口降为 `960x540`，关闭阴影、反射、间接光、环境光遮蔽、半透明和 sampled lighting，DLSS 使用 Performance，限制单 GPU；前后相机与 MP4 任务分辨率不变。可通过 `M20PRO_KIT_ARGS` 覆盖该预设。
+
 ## 待办路线
 
-1. 完成两阶段 stop 状态机的指标记录、脚本参数和静态检查，重跑 `validation_0000` 验证提前停车修复。
-2. 依次跑 `validation_0009`、`test_visible_0004`、`test_visible_0011`，每条保存 JSON、HDF5 和 H.264 视频，不用训练 episode 代替泛化证据。
-3. 扩展到至少 `20` 条未参与训练的 visible ObjectNav episode，报告成功率、跌倒率、false-stop、失败类型和逐 episode 视频。
+1. 先由视频复核 `train_0000` 左前腿、启动和停车姿态；再按新姿态门禁重跑 `train_0009/0027/0073`，旧 v4 数字不复用。
+2. 重跑 `validation_0000` 验证两阶段 stop 是否解决提前停车，再依次跑 `validation_0009`、`test_visible_0004`、`test_visible_0011`；每条保存 JSON、HDF5 和 H.264 视频。
+3. 扩展到至少 `20` 条未参与训练的 visible ObjectNav episode，报告成功率、姿态通过率、跌倒率、false-stop、失败类型和逐 episode 视频。
 4. 若 holdout 仍显示系统性提前停车，修正数据中的 approach/stop 动作语义并重新训练，不用目标位姿或手工距离阈值在推理时掩盖问题。
 5. 然后加入目标位于侧后方、被遮挡和跨房间的成功轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。
 6. 接入可验证的公开四足 parkour checkpoint。若没有 M20 的 1 m 障碍专家，由于项目仅做仿真且不要求沿用 M20 动力学，切换到有公开 checkpoint 的 Go1/ANYmal 仿真资产完成 parkour 分支，不再用失败关节序列冒充 jump 数据。

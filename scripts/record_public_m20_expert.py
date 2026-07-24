@@ -34,7 +34,18 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
 parser.add_argument("--episodes", type=int, default=4)
 parser.add_argument("--steps", type=int, default=500, help="50 Hz control steps per episode")
-parser.add_argument("--warmup-steps", type=int, default=75)
+parser.add_argument(
+    "--warmup-steps",
+    type=int,
+    default=75,
+    help="Startup frames that hold the symmetric nominal joint pose.",
+)
+parser.add_argument(
+    "--startup-action-blend-steps",
+    type=int,
+    default=10,
+    help="Initial recorded frames used to blend into commanded ONNX leg targets.",
+)
 parser.add_argument("--command-x", type=float, default=0.5)
 parser.add_argument("--command-y", type=float, default=0.0)
 parser.add_argument("--command-yaw", type=float, default=0.0)
@@ -54,7 +65,12 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--stop-after", type=int, default=None, help="Switch the expert command to zero after this control step.")
 parser.add_argument("--stop-on-target", action="store_true", help="Stop with zero action when the simulated target enters the success radius.")
 parser.add_argument("--navigate-to-target", action="store_true", help="Generate goal-directed steering demonstrations from target bearing.")
-parser.add_argument("--override-navigation-wheels", action="store_true", help="Use a geometric differential-wheel override; disabled by default for native-policy fidelity.")
+parser.add_argument(
+    "--override-navigation-wheels",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Use a geometric differential-wheel override (default: enabled for legacy indoor collection).",
+)
 parser.add_argument("--nav-forward-speed", type=float, default=0.5)
 parser.add_argument("--nav-heading-gain", type=float, default=1.0)
 parser.add_argument("--nav-max-yaw", type=float, default=0.5)
@@ -89,6 +105,26 @@ parser.add_argument(
     default=None,
     help="Root height below which an episode is terminated (default: 0.40 indoor, 0.45 legacy).",
 )
+parser.add_argument(
+    "--posture-min-root-height",
+    type=float,
+    default=None,
+    help="Minimum acceptable root height (default: 0.46 m indoor, fall threshold otherwise).",
+)
+parser.add_argument("--posture-max-roll-deg", type=float, default=10.0)
+parser.add_argument("--posture-max-pitch-deg", type=float, default=12.0)
+parser.add_argument("--posture-max-root-height-std", type=float, default=0.025)
+parser.add_argument(
+    "--startup-posture-steps",
+    type=int,
+    default=25,
+    help="Initial recorded frames covered by the stricter startup posture gate.",
+)
+parser.add_argument("--startup-max-roll-deg", type=float, default=6.0)
+parser.add_argument("--startup-max-pitch-deg", type=float, default=8.0)
+parser.add_argument("--startup-max-angular-speed", type=float, default=4.0)
+parser.add_argument("--startup-max-joint-target-jump", type=float, default=0.20)
+parser.add_argument("--startup-max-leg-symmetry-error", type=float, default=0.35)
 parser.add_argument("--turn-wheel-damping", type=float, default=None, help="Wheel Kd used while a navigation yaw command is active.")
 parser.add_argument("--wheel-radius", type=float, default=0.09)
 parser.add_argument("--track-width", type=float, default=0.48)
@@ -203,8 +239,61 @@ parser.add_argument(
     default=10,
     help="Hold each SmolVLA command for this many 50 Hz control frames.",
 )
-parser.add_argument("--smolvla-stop-threshold", type=float, default=1.10)
-parser.add_argument("--smolvla-stop-confirm-steps", type=int, default=5)
+parser.add_argument(
+    "--smolvla-ensemble-size",
+    type=int,
+    default=4,
+    help="Independent flow-matching samples per VLA query; one keeps legacy behavior.",
+)
+parser.add_argument(
+    "--smolvla-inference-seed",
+    type=int,
+    default=20260723,
+    help="Base seed for reproducible per-query SmolVLA ensemble samples.",
+)
+parser.add_argument(
+    "--smolvla-stop-min-votes",
+    type=int,
+    default=1,
+    help="Minimum ensemble members above the stop threshold for one stop vote.",
+)
+parser.add_argument("--smolvla-stop-threshold", type=float, default=0.4)
+parser.add_argument(
+    "--smolvla-stop-confirm-steps",
+    type=int,
+    default=2,
+    help="Consecutive VLA queries required after ensemble voting before latching stop.",
+)
+parser.add_argument(
+    "--smolvla-stop-approach-steps",
+    type=int,
+    default=60,
+    help="Control frames to creep forward after confirmed stop intent before braking.",
+)
+parser.add_argument(
+    "--smolvla-stop-approach-max-forward",
+    type=float,
+    default=0.18,
+    help="Maximum forward command while the confirmed stop intent is approaching.",
+)
+parser.add_argument(
+    "--smolvla-command-max-forward",
+    type=float,
+    default=0.45,
+    help="Safety cap on learner forward command in m/s.",
+)
+parser.add_argument(
+    "--smolvla-command-max-yaw",
+    type=float,
+    default=0.35,
+    help="Safety cap on learner yaw command in rad/s.",
+)
+parser.add_argument(
+    "--smolvla-command-smoothing",
+    type=float,
+    default=0.5,
+    help="New-command weight for exponential smoothing between VLA queries.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 INDOOR_SELECTION = None
@@ -235,9 +324,12 @@ if args.indoor_manifest is not None:
     args.seed = int(scenario_episode["seed"])
     args.navigate_to_target = True
     args.stop_on_target = True
-    args.override_navigation_wheels = True
+    if args.override_navigation_wheels is None:
+        args.override_navigation_wheels = True
 elif args.scenario_episode_id is not None:
     parser.error("--scenario-episode-id requires --indoor-manifest")
+if args.override_navigation_wheels is None:
+    args.override_navigation_wheels = False
 if args.task_text is None:
     args.task_text = "向前走"
 if args.stop_wheel_damping is None:
@@ -246,10 +338,20 @@ if args.implicit_wheel_actuator is None:
     args.implicit_wheel_actuator = INDOOR_SELECTION is not None
 if args.fall_height_threshold is None:
     args.fall_height_threshold = 0.40 if INDOOR_SELECTION is not None else 0.45
+if args.posture_min_root_height is None:
+    args.posture_min_root_height = (
+        0.46 if INDOOR_SELECTION is not None else args.fall_height_threshold
+    )
 if not args.video:
     parser.error("--video is required so every recorded episode has an inspectable MP4")
 if args.episodes <= 0 or args.steps <= 0:
     parser.error("--episodes and --steps must be positive")
+if args.warmup_steps <= 0:
+    parser.error("--warmup-steps must be positive")
+if args.startup_action_blend_steps <= 0:
+    parser.error("--startup-action-blend-steps must be positive")
+if args.startup_posture_steps <= 0:
+    parser.error("--startup-posture-steps must be positive")
 if args.episode_offset < 0:
     parser.error("--episode-offset must be non-negative")
 if args.initial_yaw_jitter_deg < 0.0:
@@ -284,6 +386,19 @@ if args.stop_speed_threshold <= 0.0 or args.stop_confirm_steps <= 0 or args.targ
     parser.error("stop speed, confirmation and target hold settings must be positive")
 if args.fall_height_threshold <= 0.0:
     parser.error("--fall-height-threshold must be positive")
+if args.posture_min_root_height < args.fall_height_threshold:
+    parser.error("--posture-min-root-height must not be below --fall-height-threshold")
+if (
+    args.posture_max_roll_deg <= 0.0
+    or args.posture_max_pitch_deg <= 0.0
+    or args.posture_max_root_height_std <= 0.0
+    or args.startup_max_roll_deg <= 0.0
+    or args.startup_max_pitch_deg <= 0.0
+    or args.startup_max_angular_speed <= 0.0
+    or args.startup_max_joint_target_jump <= 0.0
+    or args.startup_max_leg_symmetry_error <= 0.0
+):
+    parser.error("posture thresholds must be positive")
 if not -60.0 <= args.camera_pitch_deg <= 60.0:
     parser.error("--camera-pitch-deg must be between -60 and 60 degrees")
 if args.camera_focal_length <= 0.0:
@@ -321,6 +436,18 @@ if not 0.0 <= args.smolvla_dagger_stability_intervention_height <= 1.0:
     parser.error("--smolvla-dagger-stability-intervention-height must be in [0, 1]")
 if args.smolvla_action_hold_steps <= 0 or args.smolvla_stop_confirm_steps <= 0:
     parser.error("SmolVLA hold and stop confirmation steps must be positive")
+if args.smolvla_ensemble_size <= 0:
+    parser.error("--smolvla-ensemble-size must be positive")
+if args.smolvla_stop_min_votes <= 0 or args.smolvla_stop_min_votes > args.smolvla_ensemble_size:
+    parser.error("--smolvla-stop-min-votes must be within the ensemble size")
+if args.smolvla_command_max_forward <= 0.0 or args.smolvla_command_max_yaw <= 0.0:
+    parser.error("SmolVLA command safety caps must be positive")
+if args.smolvla_stop_approach_steps < 0:
+    parser.error("--smolvla-stop-approach-steps must be non-negative")
+if not 0.0 < args.smolvla_stop_approach_max_forward <= args.smolvla_command_max_forward:
+    parser.error("SmolVLA stop approach speed must be positive and within the forward cap")
+if not 0.0 < args.smolvla_command_smoothing <= 1.0:
+    parser.error("--smolvla-command-smoothing must be in (0, 1]")
 if args.smolvla_stop_threshold <= 0.0:
     parser.error("--smolvla-stop-threshold must be positive")
 if args.dagger_skill_checkpoint is not None and not args.navigate_to_target:
@@ -604,6 +731,33 @@ def yaw_from_quaternion(quat: torch.Tensor) -> float:
     )
 
 
+def roll_pitch_from_quaternion(quat: torch.Tensor) -> tuple[float, float]:
+    """Return body roll and pitch in degrees for posture validation."""
+    w, x, y, z = quat.detach().cpu().numpy()
+    roll = np.arctan2(
+        2.0 * (w * x + y * z),
+        1.0 - 2.0 * (x * x + y * y),
+    )
+    pitch = np.arcsin(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
+    return float(np.degrees(roll)), float(np.degrees(pitch))
+
+
+def leg_symmetry_error(robot: Articulation, leg_ids: list[int]) -> float:
+    """Measure left-right standing-pose asymmetry in joint radians."""
+    leg_position = robot.data.joint_pos[0, leg_ids]
+    symmetry_residual = torch.stack(
+        (
+            leg_position[0] + leg_position[3],
+            leg_position[1] - leg_position[4],
+            leg_position[2] - leg_position[5],
+            leg_position[6] + leg_position[9],
+            leg_position[7] - leg_position[10],
+            leg_position[8] - leg_position[11],
+        )
+    )
+    return float(torch.max(torch.abs(symmetry_residual)).item())
+
+
 def navigation_command(robot: Articulation, target_reached: bool) -> tuple[float, float, float]:
     if target_reached:
         return (0.0, 0.0, 0.0)
@@ -790,7 +944,14 @@ def public_expert_action(
     command: tuple[float, float, float],
     target_reached: bool,
 ) -> torch.Tensor:
+    wheel_command = command
     policy_command = (0.0, 0.0, 0.0) if target_reached else command
+    if args.navigate_to_target and args.override_navigation_wheels:
+        # Steering is supplied by the differential-wheel override below. Do
+        # not also feed yaw into the released leg policy: its native turning
+        # behavior unloads one front leg while the overridden wheels continue
+        # to push, producing the persistent asymmetric front-leg posture.
+        policy_command = (policy_command[0], 0.0, 0.0)
     mirror = args.mirror_negative_yaw and policy_command[2] < -1e-6
     if mirror:
         policy_command = (policy_command[0], policy_command[1], abs(policy_command[2]))
@@ -806,7 +967,7 @@ def public_expert_action(
     if mirror:
         action = mirror_action(action)
     if args.navigate_to_target and args.override_navigation_wheels:
-        override_command = target_stop_command(robot) if target_reached else command
+        override_command = target_stop_command(robot) if target_reached else wheel_command
         action = override_navigation_wheels(action, override_command, previous_action)
     return action
 
@@ -997,8 +1158,18 @@ def main() -> None:
             args.smolvla_dagger_stability_intervention_height
         ),
         "smolvla_action_hold_steps": args.smolvla_action_hold_steps,
+        "smolvla_ensemble_size": args.smolvla_ensemble_size,
+        "smolvla_inference_seed": args.smolvla_inference_seed,
+        "smolvla_stop_min_votes": args.smolvla_stop_min_votes,
         "smolvla_stop_threshold": args.smolvla_stop_threshold,
         "smolvla_stop_confirm_steps": args.smolvla_stop_confirm_steps,
+        "smolvla_stop_approach_steps": args.smolvla_stop_approach_steps,
+        "smolvla_stop_approach_max_forward": (
+            args.smolvla_stop_approach_max_forward
+        ),
+        "smolvla_command_max_forward": args.smolvla_command_max_forward,
+        "smolvla_command_max_yaw": args.smolvla_command_max_yaw,
+        "smolvla_command_smoothing": args.smolvla_command_smoothing,
         "navigation": {
             "forward_speed": args.nav_forward_speed, "heading_gain": args.nav_heading_gain,
             "max_yaw": args.nav_max_yaw, "turn_threshold": args.nav_turn_threshold,
@@ -1025,6 +1196,22 @@ def main() -> None:
         },
         "control_hz": 50.0, "joint_names": POLICY_JOINT_NAMES,
         "fall_height_threshold": args.fall_height_threshold,
+        "startup_control": {
+            "warmup_steps": args.warmup_steps,
+            "action_blend_steps": args.startup_action_blend_steps,
+        },
+        "posture_gate": {
+            "min_root_height_m": args.posture_min_root_height,
+            "max_roll_deg": args.posture_max_roll_deg,
+            "max_pitch_deg": args.posture_max_pitch_deg,
+            "max_root_height_std_m": args.posture_max_root_height_std,
+            "startup_steps": args.startup_posture_steps,
+            "startup_max_roll_deg": args.startup_max_roll_deg,
+            "startup_max_pitch_deg": args.startup_max_pitch_deg,
+            "startup_max_angular_speed_rps": args.startup_max_angular_speed,
+            "startup_max_joint_target_jump_rad": args.startup_max_joint_target_jump,
+            "startup_max_leg_symmetry_error_rad": args.startup_max_leg_symmetry_error,
+        },
         "sensor_alignment": "pre_action",
         "lidar_mesh_scope": (
             "ground_indoor_geometry_and_target"
@@ -1044,7 +1231,10 @@ def main() -> None:
             "fields": ["forward_mps", "lateral_mps", "yaw_rps", "stop", "search", "parkour"],
             "source": "privileged demonstration expert only; never exposed at VLA inference",
         },
-        "success_rule": "stable plus command-direction check; target episodes also require reaching target_xy",
+        "success_rule": (
+            "posture gate plus command-direction check; target episodes also "
+            "require reaching and holding target_xy"
+        ),
     }
     if INDOOR_SELECTION is not None:
         metadata_name = f"metadata_{INDOOR_SELECTION['episode']['id']}.json"
@@ -1067,14 +1257,32 @@ def main() -> None:
         )
         episode_initial_yaw_rad = float(np.deg2rad(episode_initial_yaw_deg))
         reset_scene(scene, episode_initial_yaw_rad)
+        startup_action = torch.zeros((1, 16), device=robot.device)
+        warmup_max_joint_target_jump = 0.0
         for _ in range(args.warmup_steps):
-            robot.set_joint_position_target(default_pose, joint_ids=leg_ids)
+            warmup_action = torch.zeros_like(startup_action)
+            robot.set_joint_position_target(
+                default_pose,
+                joint_ids=leg_ids,
+            )
             robot.set_joint_velocity_target(zero_wheels, joint_ids=wheel_ids)
             robot.set_joint_effort_target(zero_wheels, joint_ids=wheel_ids)
-            scene.write_data_to_sim()
-            for _ in range(4):
-                sim.step(render=_ == 3)
+            for physics_substep in range(4):
+                # Explicit actuators must recompute and write PD effort at the
+                # 200 Hz physics rate. Writing once per 50 Hz control frame
+                # leaves three substeps with stale effort and excites the
+                # startup oscillation before the policy sees its first frame.
+                scene.write_data_to_sim()
+                sim.step(render=physics_substep == 3)
                 scene.update(physics_dt)
+            startup_action = warmup_action
+        warmup_final_roll_deg, warmup_final_pitch_deg = roll_pitch_from_quaternion(
+            robot.data.root_quat_w[0]
+        )
+        warmup_final_angular_speed = float(
+            torch.linalg.vector_norm(robot.data.root_ang_vel_b[0]).item()
+        )
+        warmup_final_leg_symmetry_error = leg_symmetry_error(robot, leg_ids)
         episode_stem = (
             f"episode_{INDOOR_SELECTION['episode']['id']}"
             if INDOOR_SELECTION is not None
@@ -1090,9 +1298,29 @@ def main() -> None:
         video = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 50.0, (480, 288))
         if not video.isOpened():
             raise RuntimeError(f"Unable to open video writer: {video_path}")
-        last_action = torch.zeros((1, 16), device=robot.device)
-        dagger_last_action = torch.zeros((1, 16), device=robot.device)
+        last_action = startup_action.clone()
+        dagger_last_action = startup_action.clone()
+        previous_execution_action = startup_action.clone()
         min_height = max_height = float(robot.data.root_pos_w[0, 2].item())
+        initial_roll_deg, initial_pitch_deg = roll_pitch_from_quaternion(
+            robot.data.root_quat_w[0]
+        )
+        initial_angular_speed = float(
+            torch.linalg.vector_norm(robot.data.root_ang_vel_b[0]).item()
+        )
+        initial_leg_symmetry_error = leg_symmetry_error(robot, leg_ids)
+        root_height_sum = 0.0
+        root_height_square_sum = 0.0
+        max_abs_roll_deg = abs(initial_roll_deg)
+        max_abs_pitch_deg = abs(initial_pitch_deg)
+        max_body_angular_speed = initial_angular_speed
+        max_leg_symmetry_error = initial_leg_symmetry_error
+        max_joint_target_jump = warmup_max_joint_target_jump
+        startup_max_abs_roll_deg = abs(initial_roll_deg)
+        startup_max_abs_pitch_deg = abs(initial_pitch_deg)
+        startup_max_body_angular_speed = initial_angular_speed
+        startup_max_leg_symmetry_error = initial_leg_symmetry_error
+        startup_max_joint_target_jump = warmup_max_joint_target_jump
         terminated_steps = 0
         start_x = float(robot.data.root_pos_w[0, 0].item())
         start_quat = robot.data.root_quat_w[0].detach().cpu().numpy()
@@ -1105,9 +1333,14 @@ def main() -> None:
         stop_triggered_step = None
         smolvla_stop_latched = False
         smolvla_stop_latched_step = None
+        smolvla_stop_armed_step = None
         smolvla_stop_streak = 0
         smolvla_cached_command = (0.0, 0.0, 0.0)
         smolvla_cached_action = np.zeros(6, dtype=np.float32)
+        smolvla_stop_score = 0.0
+        smolvla_stop_votes = 0
+        smolvla_max_stop_score = 0.0
+        smolvla_max_stop_votes = 0
         smolvla_inference_count = 0
         low_speed_streak = 0
         post_stop_target_hold_streak = 0
@@ -1164,6 +1397,26 @@ def main() -> None:
                 if args.smolvla_dagger_labels
                 else None
             )
+            smolvla_stop_score_ds = (
+                h5.create_dataset("smolvla_stop_score", (args.steps,), dtype="f4")
+                if smolvla_model is not None
+                else None
+            )
+            smolvla_stop_votes_ds = (
+                h5.create_dataset("smolvla_stop_votes", (args.steps,), dtype="u1")
+                if smolvla_model is not None
+                else None
+            )
+            smolvla_execution_command_ds = (
+                h5.create_dataset(
+                    "smolvla_execution_command",
+                    (args.steps, 3),
+                    dtype="f4",
+                    compression="lzf",
+                )
+                if smolvla_model is not None
+                else None
+            )
             learner_command_ds = (
                 h5.create_dataset("learner_command", (args.steps, 3), dtype="f4", compression="lzf")
                 if dagger_skill_model is not None
@@ -1191,6 +1444,22 @@ def main() -> None:
             h5.attrs["implicit_wheel_damping"] = args.implicit_wheel_damping
             h5.attrs["wheel_actuator"] = metadata["wheel_actuator"]
             h5.attrs["fall_height_threshold"] = args.fall_height_threshold
+            h5.attrs["warmup_steps"] = args.warmup_steps
+            h5.attrs["startup_action_blend_steps"] = args.startup_action_blend_steps
+            h5.attrs["posture_min_root_height"] = args.posture_min_root_height
+            h5.attrs["posture_max_roll_deg"] = args.posture_max_roll_deg
+            h5.attrs["posture_max_pitch_deg"] = args.posture_max_pitch_deg
+            h5.attrs["posture_max_root_height_std"] = args.posture_max_root_height_std
+            h5.attrs["startup_posture_steps"] = args.startup_posture_steps
+            h5.attrs["startup_max_roll_deg"] = args.startup_max_roll_deg
+            h5.attrs["startup_max_pitch_deg"] = args.startup_max_pitch_deg
+            h5.attrs["startup_max_angular_speed"] = args.startup_max_angular_speed
+            h5.attrs["startup_max_joint_target_jump_threshold"] = (
+                args.startup_max_joint_target_jump
+            )
+            h5.attrs["startup_max_leg_symmetry_error_threshold"] = (
+                args.startup_max_leg_symmetry_error
+            )
             h5.attrs["expert"] = metadata["expert"]
             h5.attrs["asset_usd_path"] = metadata["asset_usd_path"]
             h5.attrs["control_hz"] = metadata["control_hz"]
@@ -1199,6 +1468,18 @@ def main() -> None:
                 "body_linear_velocity_3,body_angular_velocity_3,projected_gravity_xy_2,lidar_sector_min_24"
             )
             h5.attrs["smolvla_dagger_labels"] = args.smolvla_dagger_labels
+            h5.attrs["smolvla_ensemble_size"] = args.smolvla_ensemble_size
+            h5.attrs["smolvla_inference_seed"] = args.smolvla_inference_seed
+            h5.attrs["smolvla_stop_min_votes"] = args.smolvla_stop_min_votes
+            h5.attrs["smolvla_stop_threshold"] = args.smolvla_stop_threshold
+            h5.attrs["smolvla_stop_confirm_steps"] = args.smolvla_stop_confirm_steps
+            h5.attrs["smolvla_stop_approach_steps"] = args.smolvla_stop_approach_steps
+            h5.attrs["smolvla_stop_approach_max_forward"] = (
+                args.smolvla_stop_approach_max_forward
+            )
+            h5.attrs["smolvla_command_max_forward"] = args.smolvla_command_max_forward
+            h5.attrs["smolvla_command_max_yaw"] = args.smolvla_command_max_yaw
+            h5.attrs["smolvla_command_smoothing"] = args.smolvla_command_smoothing
             h5.attrs["smolvla_dagger_expert_alpha"] = args.smolvla_dagger_expert_alpha
             h5.attrs["smolvla_dagger_visible_intervention_fraction"] = (
                 args.smolvla_dagger_visible_intervention_fraction
@@ -1315,34 +1596,114 @@ def main() -> None:
                             "task": args.task_text,
                         }
                         smol_batch = smolvla_preprocessor(smol_raw)
-                        with torch.inference_mode():
-                            smol_prediction = smolvla_postprocessor(
-                                smolvla_model.select_action(smol_batch)
+                        ensemble_actions = []
+                        query_seed = (
+                            args.smolvla_inference_seed
+                            + 1_000_003 * (episode_id + 1)
+                            + 1_009 * smolvla_inference_count
+                        )
+                        for ensemble_index in range(args.smolvla_ensemble_size):
+                            sample_seed = query_seed + ensemble_index
+                            torch.manual_seed(sample_seed)
+                            if torch.cuda.is_available():
+                                torch.cuda.manual_seed_all(sample_seed)
+                            smolvla_model.reset()
+                            with torch.inference_mode():
+                                smol_prediction = smolvla_postprocessor(
+                                    smolvla_model.select_action(smol_batch)
+                                )
+                            sample_action = (
+                                smol_prediction.detach()
+                                .cpu()
+                                .numpy()
+                                .reshape(-1)
+                                .astype(np.float32)
                             )
-                        smolvla_cached_action = (
-                            smol_prediction.detach().cpu().numpy().reshape(-1).astype(np.float32)
+                            ensemble_actions.append(
+                                np.nan_to_num(
+                                    sample_action, nan=0.0, posinf=0.0, neginf=0.0
+                                )
+                            )
+                        ensemble_actions = np.asarray(ensemble_actions, dtype=np.float32)
+                        smolvla_cached_action = ensemble_actions.mean(axis=0)
+                        smolvla_stop_score = float(ensemble_actions[:, 3].max())
+                        smolvla_stop_votes = int(
+                            np.count_nonzero(
+                                ensemble_actions[:, 3] >= args.smolvla_stop_threshold
+                            )
                         )
-                        smolvla_cached_action = np.nan_to_num(
-                            smolvla_cached_action, nan=0.0, posinf=0.0, neginf=0.0
+                        smolvla_max_stop_score = max(
+                            smolvla_max_stop_score, smolvla_stop_score
                         )
-                        smolvla_cached_command = (
-                            float(np.clip(smolvla_cached_action[0], -args.nav_forward_speed, args.nav_forward_speed)),
-                            float(np.clip(smolvla_cached_action[1], -args.nav_forward_speed, args.nav_forward_speed)),
-                            float(np.clip(smolvla_cached_action[2], -args.nav_max_yaw, args.nav_max_yaw)),
+                        smolvla_max_stop_votes = max(
+                            smolvla_max_stop_votes, smolvla_stop_votes
+                        )
+                        raw_command = (
+                            float(
+                                np.clip(
+                                    smolvla_cached_action[0],
+                                    -args.smolvla_command_max_forward,
+                                    args.smolvla_command_max_forward,
+                                )
+                            ),
+                            float(
+                                np.clip(
+                                    smolvla_cached_action[1],
+                                    -args.smolvla_command_max_forward,
+                                    args.smolvla_command_max_forward,
+                                )
+                            ),
+                            float(
+                                np.clip(
+                                    smolvla_cached_action[2],
+                                    -args.smolvla_command_max_yaw,
+                                    args.smolvla_command_max_yaw,
+                                )
+                            ),
+                        )
+                        command_alpha = args.smolvla_command_smoothing
+                        smolvla_cached_command = tuple(
+                            (1.0 - command_alpha) * previous_command
+                            + command_alpha * new_command
+                            for previous_command, new_command in zip(
+                                smolvla_cached_command, raw_command
+                            )
                         )
                         smolvla_inference_count += 1
-                        if float(smolvla_cached_action[3]) >= args.smolvla_stop_threshold:
+                        if smolvla_stop_votes >= args.smolvla_stop_min_votes:
                             smolvla_stop_streak += 1
                         else:
                             smolvla_stop_streak = 0
                         if (
                             smolvla_stop_streak >= args.smolvla_stop_confirm_steps
+                            and smolvla_stop_armed_step is None
+                        ):
+                            smolvla_stop_armed_step = step
+                        if (
+                            smolvla_stop_armed_step is not None
+                            and step - smolvla_stop_armed_step
+                            >= args.smolvla_stop_approach_steps
                             and not smolvla_stop_latched
                         ):
                             smolvla_stop_latched = True
                             smolvla_stop_latched_step = step
                             stop_triggered_step = step
                     learner_command = smolvla_cached_command
+                    if (
+                        smolvla_stop_armed_step is not None
+                        and not smolvla_stop_latched
+                    ):
+                        learner_command = (
+                            float(
+                                np.clip(
+                                    learner_command[0],
+                                    -args.smolvla_stop_approach_max_forward,
+                                    args.smolvla_stop_approach_max_forward,
+                                )
+                            ),
+                            learner_command[1],
+                            learner_command[2],
+                        )
                     learner_skill = "stop" if smolvla_stop_latched else "forward"
                 elif dagger_model is not None:
                     vla_observation = native_observation(
@@ -1465,12 +1826,12 @@ def main() -> None:
                 if target_intervention:
                     execution_command = expert_command
                     smolvla_target_intervention_steps += 1
+                executed_command = execution_command
                 # Target pose is evaluation/label truth only. A learner-only
                 # SmolVLA replay may brake only after its own stop latch.
                 wheel_stop_mode = (
                     smolvla_stop_latched if smolvla_model is not None else target_reached
                 )
-                set_navigation_wheel_damping(robot, execution_command, wheel_stop_mode)
                 planar_speed = float(
                     torch.linalg.vector_norm(robot.data.root_lin_vel_w[0, :2]).item()
                 )
@@ -1488,10 +1849,9 @@ def main() -> None:
                         stop_latched = True
                         stop_latched_step = step
                         stop_triggered_step = step
-                # Keep the native leg stabilizer active at the target. The
-                # wheel override applies a bounded reverse command based on
-                # measured body velocity, which dissipates inertia without
-                # replacing the learned posture controller.
+                # During pre-latch braking, preserve the last moving leg
+                # targets. After latching, switch to the symmetric nominal
+                # pose because the released policy is unstable at zero speed.
                 stop_now = (
                     (args.stop_after is not None and step >= args.stop_after)
                     or (
@@ -1502,10 +1862,18 @@ def main() -> None:
                     or smolvla_stop_latched
                 )
                 if stop_now:
+                    executed_command = (0.0, 0.0, 0.0)
+                set_navigation_wheel_damping(robot, executed_command, wheel_stop_mode)
+                if stop_now:
+                    # The released ONNX policy is unstable for a zero command.
+                    # Hold its symmetric nominal pose and lock only the wheels.
                     expert_action = torch.zeros((1, 16), device=robot.device)
                 elif args.navigate_to_target and wheel_stop_mode and args.override_navigation_wheels:
+                    # Preserve the last stable leg targets while wheel braking
+                    # removes residual motion before the final standing pose.
+                    expert_action = policy_last_action.clone()
                     expert_action = override_navigation_wheels(
-                        torch.zeros((1, 16), device=robot.device),
+                        expert_action,
                         target_stop_command(robot),
                         policy_last_action,
                     )
@@ -1515,8 +1883,8 @@ def main() -> None:
                         robot,
                         joint_ids,
                         policy_last_action,
-                        (execution_command if smolvla_model is not None else expert_command),
-                        False if smolvla_model is not None else wheel_stop_mode,
+                        executed_command,
+                        False,
                     )
                 execution_action = expert_action
                 if vla_action is not None:
@@ -1529,18 +1897,40 @@ def main() -> None:
                         robot,
                         joint_ids,
                         policy_last_action,
-                        learner_command,
+                        executed_command,
                         wheel_stop_mode,
                     )
                 if stop_now:
-                    # Do not let the learner reintroduce motion after the
-                    # oracle has declared the visual target reached.
-                    execution_action = torch.zeros_like(expert_action)
+                    # Do not let a learner reintroduce motion after stop.
+                    execution_action = expert_action
+                elif step < args.startup_action_blend_steps:
+                    startup_action_alpha = (
+                        float(step + 1) / args.startup_action_blend_steps
+                    )
+                    execution_action = execution_action.clone()
+                    execution_action[:, :12] *= startup_action_alpha
+                    if vla_action is None and dagger_skill_model is None:
+                        expert_action = execution_action
+                joint_target_jump = float(
+                    torch.max(
+                        torch.abs(
+                            (execution_action[:, :12] - previous_execution_action[:, :12])
+                            * leg_scale
+                        )
+                    ).item()
+                )
+                max_joint_target_jump = max(max_joint_target_jump, joint_target_jump)
+                if step < args.startup_posture_steps:
+                    startup_max_joint_target_jump = max(
+                        startup_max_joint_target_jump,
+                        joint_target_jump,
+                    )
                 robot.set_joint_position_target(default_pose + execution_action[:, :12] * leg_scale, joint_ids=leg_ids)
                 robot.set_joint_velocity_target(execution_action[:, 12:] * 5.0, joint_ids=wheel_ids)
                 robot.set_joint_effort_target(zero_wheels, joint_ids=wheel_ids)
                 last_action = expert_action
                 dagger_last_action = execution_action
+                previous_execution_action = execution_action.clone()
                 camera_target = robot.data.root_pos_w + quat_apply(
                     robot.data.root_quat_w,
                     torch.tensor([[1.2, 0.0, 0.15]], device=robot.device),
@@ -1567,6 +1957,14 @@ def main() -> None:
                     expert_action[0].cpu().numpy(),
                 )
                 smolvla_proprio_ds[step] = smolvla_proprio
+                if smolvla_stop_score_ds is not None:
+                    smolvla_stop_score_ds[step] = smolvla_stop_score
+                if smolvla_stop_votes_ds is not None:
+                    smolvla_stop_votes_ds[step] = smolvla_stop_votes
+                if smolvla_execution_command_ds is not None:
+                    smolvla_execution_command_ds[step] = np.asarray(
+                        executed_command, dtype=np.float32
+                    )
                 command_ds[step] = np.asarray(expert_command, dtype=np.float32)
                 front_target_fraction_ds[step] = front_target_fraction
                 rear_target_fraction_ds[step] = rear_target_fraction
@@ -1609,6 +2007,42 @@ def main() -> None:
                 previous_xy = current_xy.clone()
                 height = float(robot.data.root_pos_w[0, 2].item())
                 min_height, max_height = min(min_height, height), max(max_height, height)
+                root_height_sum += height
+                root_height_square_sum += height * height
+                roll_deg, pitch_deg = roll_pitch_from_quaternion(
+                    robot.data.root_quat_w[0]
+                )
+                body_angular_speed = float(
+                    torch.linalg.vector_norm(robot.data.root_ang_vel_b[0]).item()
+                )
+                symmetry_error = leg_symmetry_error(robot, leg_ids)
+                max_abs_roll_deg = max(max_abs_roll_deg, abs(roll_deg))
+                max_abs_pitch_deg = max(max_abs_pitch_deg, abs(pitch_deg))
+                max_body_angular_speed = max(
+                    max_body_angular_speed,
+                    body_angular_speed,
+                )
+                max_leg_symmetry_error = max(
+                    max_leg_symmetry_error,
+                    symmetry_error,
+                )
+                if step < args.startup_posture_steps:
+                    startup_max_abs_roll_deg = max(
+                        startup_max_abs_roll_deg,
+                        abs(roll_deg),
+                    )
+                    startup_max_abs_pitch_deg = max(
+                        startup_max_abs_pitch_deg,
+                        abs(pitch_deg),
+                    )
+                    startup_max_body_angular_speed = max(
+                        startup_max_body_angular_speed,
+                        body_angular_speed,
+                    )
+                    startup_max_leg_symmetry_error = max(
+                        startup_max_leg_symmetry_error,
+                        symmetry_error,
+                    )
                 if TARGET_PRESENT:
                     target_delta = robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
                     target_distance = float(torch.linalg.vector_norm(target_delta).item())
@@ -1637,9 +2071,41 @@ def main() -> None:
                 current_yaw = float(np.arctan2(2.0 * (quat[0] * quat[3] + quat[1] * quat[2]), 1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2)))
                 yaw_delta = float(np.arctan2(np.sin(current_yaw - start_yaw), np.cos(current_yaw - start_yaw)))
             displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
-            stable = (
-                terminated_steps == 0 and min_height >= args.fall_height_threshold
+            root_height_mean = root_height_sum / args.steps
+            root_height_std = float(
+                np.sqrt(
+                    max(
+                        root_height_square_sum / args.steps
+                        - root_height_mean * root_height_mean,
+                        0.0,
+                    )
+                )
             )
+            final_roll_deg, final_pitch_deg = roll_pitch_from_quaternion(
+                robot.data.root_quat_w[0]
+            )
+            final_body_angular_speed = float(
+                torch.linalg.vector_norm(robot.data.root_ang_vel_b[0]).item()
+            )
+            final_leg_symmetry_error = leg_symmetry_error(robot, leg_ids)
+            startup_posture_ok = bool(
+                startup_max_abs_roll_deg <= args.startup_max_roll_deg
+                and startup_max_abs_pitch_deg <= args.startup_max_pitch_deg
+                and startup_max_body_angular_speed
+                <= args.startup_max_angular_speed
+                and startup_max_joint_target_jump
+                <= args.startup_max_joint_target_jump
+                and startup_max_leg_symmetry_error
+                <= args.startup_max_leg_symmetry_error
+            )
+            posture_ok = bool(
+                min_height >= args.posture_min_root_height
+                and max_abs_roll_deg <= args.posture_max_roll_deg
+                and max_abs_pitch_deg <= args.posture_max_pitch_deg
+                and root_height_std <= args.posture_max_root_height_std
+                and startup_posture_ok
+            )
+            stable = terminated_steps == 0 and posture_ok
             final_target_distance = (
                 float(torch.linalg.vector_norm(
                     robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
@@ -1668,6 +2134,36 @@ def main() -> None:
             h5.attrs["yaw_delta"] = yaw_delta
             h5.attrs["min_root_height"] = min_height
             h5.attrs["max_root_height"] = max_height
+            h5.attrs["root_height_mean"] = root_height_mean
+            h5.attrs["root_height_std"] = root_height_std
+            h5.attrs["warmup_final_roll_deg"] = warmup_final_roll_deg
+            h5.attrs["warmup_final_pitch_deg"] = warmup_final_pitch_deg
+            h5.attrs["warmup_final_angular_speed"] = warmup_final_angular_speed
+            h5.attrs["warmup_final_leg_symmetry_error"] = (
+                warmup_final_leg_symmetry_error
+            )
+            h5.attrs["max_abs_roll_deg"] = max_abs_roll_deg
+            h5.attrs["max_abs_pitch_deg"] = max_abs_pitch_deg
+            h5.attrs["max_body_angular_speed"] = max_body_angular_speed
+            h5.attrs["max_leg_symmetry_error"] = max_leg_symmetry_error
+            h5.attrs["max_joint_target_jump"] = max_joint_target_jump
+            h5.attrs["startup_max_abs_roll_deg"] = startup_max_abs_roll_deg
+            h5.attrs["startup_max_abs_pitch_deg"] = startup_max_abs_pitch_deg
+            h5.attrs["startup_max_body_angular_speed"] = (
+                startup_max_body_angular_speed
+            )
+            h5.attrs["startup_max_leg_symmetry_error"] = (
+                startup_max_leg_symmetry_error
+            )
+            h5.attrs["startup_max_joint_target_jump"] = (
+                startup_max_joint_target_jump
+            )
+            h5.attrs["final_roll_deg"] = final_roll_deg
+            h5.attrs["final_pitch_deg"] = final_pitch_deg
+            h5.attrs["final_body_angular_speed"] = final_body_angular_speed
+            h5.attrs["final_leg_symmetry_error"] = final_leg_symmetry_error
+            h5.attrs["startup_posture_ok"] = startup_posture_ok
+            h5.attrs["posture_ok"] = posture_ok
             h5.attrs["terminated_steps"] = terminated_steps
             h5.attrs["command_ok"] = command_ok
             h5.attrs["target_reached"] = target_reached
@@ -1679,6 +2175,8 @@ def main() -> None:
                 -1 if smolvla_stop_latched_step is None else smolvla_stop_latched_step
             )
             h5.attrs["smolvla_inference_count"] = smolvla_inference_count
+            h5.attrs["smolvla_stop_score_max"] = smolvla_max_stop_score
+            h5.attrs["smolvla_stop_votes_max"] = smolvla_max_stop_votes
             h5.attrs["stop_pretrigger_radius"] = args.stop_pretrigger_radius
             h5.attrs["max_post_stop_target_hold_steps"] = max_post_stop_target_hold_steps
             h5.attrs["min_target_distance"] = min_target_distance if TARGET_PRESENT else -1.0
@@ -1704,7 +2202,7 @@ def main() -> None:
         path = final_path
         video_path = final_video_path
         displacement = float(robot.data.root_pos_w[0, 0].item()) - start_x
-        stable = terminated_steps == 0 and min_height >= args.fall_height_threshold
+        stable = terminated_steps == 0 and posture_ok
         final_target_distance = (
             float(torch.linalg.vector_norm(
                 robot.data.root_pos_w[0, :2] - torch.tensor([args.target_x, args.target_y], device=robot.device)
@@ -1742,6 +2240,29 @@ def main() -> None:
             "yaw_delta_rad": yaw_delta,
             "path_length_m": path_length,
             "min_root_height_m": min_height,
+            "max_root_height_m": max_height,
+            "root_height_mean_m": root_height_mean,
+            "root_height_std_m": root_height_std,
+            "warmup_final_roll_deg": warmup_final_roll_deg,
+            "warmup_final_pitch_deg": warmup_final_pitch_deg,
+            "warmup_final_angular_speed_rps": warmup_final_angular_speed,
+            "warmup_final_leg_symmetry_error_rad": warmup_final_leg_symmetry_error,
+            "max_abs_roll_deg": max_abs_roll_deg,
+            "max_abs_pitch_deg": max_abs_pitch_deg,
+            "max_body_angular_speed_rps": max_body_angular_speed,
+            "max_leg_symmetry_error_rad": max_leg_symmetry_error,
+            "max_joint_target_jump_rad": max_joint_target_jump,
+            "startup_max_abs_roll_deg": startup_max_abs_roll_deg,
+            "startup_max_abs_pitch_deg": startup_max_abs_pitch_deg,
+            "startup_max_body_angular_speed_rps": startup_max_body_angular_speed,
+            "startup_max_leg_symmetry_error_rad": startup_max_leg_symmetry_error,
+            "startup_max_joint_target_jump_rad": startup_max_joint_target_jump,
+            "final_roll_deg": final_roll_deg,
+            "final_pitch_deg": final_pitch_deg,
+            "final_body_angular_speed_rps": final_body_angular_speed,
+            "final_leg_symmetry_error_rad": final_leg_symmetry_error,
+            "startup_posture_ok": startup_posture_ok,
+            "posture_ok": posture_ok,
             "terminated_steps": terminated_steps,
             "target_reached": target_reached,
             "target_reached_step": target_reached_step,
@@ -1753,6 +2274,15 @@ def main() -> None:
             "smolvla_stop_latched": smolvla_stop_latched,
             "smolvla_stop_latched_step": smolvla_stop_latched_step,
             "smolvla_inference_count": smolvla_inference_count,
+            "smolvla_ensemble_size": args.smolvla_ensemble_size,
+            "smolvla_stop_min_votes": args.smolvla_stop_min_votes,
+            "smolvla_stop_threshold": args.smolvla_stop_threshold,
+            "smolvla_stop_confirm_queries": args.smolvla_stop_confirm_steps,
+            "smolvla_stop_score_max": smolvla_max_stop_score,
+            "smolvla_stop_votes_max": smolvla_max_stop_votes,
+            "smolvla_command_max_forward": args.smolvla_command_max_forward,
+            "smolvla_command_max_yaw": args.smolvla_command_max_yaw,
+            "smolvla_command_smoothing": args.smolvla_command_smoothing,
             "smolvla_visible_intervention_steps": smolvla_visible_intervention_steps,
             "smolvla_stability_intervention_steps": smolvla_stability_intervention_steps,
             "smolvla_target_intervention_steps": smolvla_target_intervention_steps,
@@ -1784,7 +2314,9 @@ def main() -> None:
         print(
             f"[M20PRO-NATIVE-EXPERT] episode={episode_id} initial_yaw_deg={episode_initial_yaw_deg:.3f} "
             f"x_displacement={displacement:.4f} m yaw_delta={yaw_delta:.4f} rad "
-            f"min_root_height={min_height:.4f} m terminated_steps={terminated_steps} command_ok={command_ok} "
+            f"min_root_height={min_height:.4f} m root_height_std={root_height_std:.4f} m "
+            f"max_roll={max_abs_roll_deg:.2f} deg startup_ang_vel={startup_max_body_angular_speed:.3f} rad/s "
+            f"posture_ok={posture_ok} terminated_steps={terminated_steps} command_ok={command_ok} "
             f"target_reached={target_reached} final_target_distance={final_target_distance} "
             f"reached_step={target_reached_step} path_length={path_length:.4f} m success={success} "
             f"expert_interventions={expert_intervention_steps} "
