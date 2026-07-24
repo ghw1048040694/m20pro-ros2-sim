@@ -1,6 +1,6 @@
 # M20 Pro VLA 具身智能仿真项目记录
 
-Last updated: 2026-07-23 CST (23:05)
+Last updated: 2026-07-24 CST
 
 ## 项目边界
 
@@ -570,13 +570,21 @@ python scripts/play_m20_vla_skill.py --headless --video \
 - 同一回放帧的多次 SmolVLA 推理显示 flow-matching 采样具有明显随机性：`train_0000` 第 100 帧 stop 输出在不同采样中约 `-0.05~0.99`，单次回放采样可能只有 `0.077`，而停车逻辑要求连续 5 次超过 `0.4`。因此当前主要问题是随机 action chunk 导致 stop 不稳定及其后的持续前进，不是简单增加训练步数。
 - 当前结论：v3 仍不能称为 visible ObjectNav 成果；应先做固定/集成推理和动作安全包络实验，稳定停车且不跌倒后再汇总多场景成功率。隐藏搜索、place navigation 和 1 m 跳跃继续冻结。
 
+### SmolVLA ensemble 闭环与首条 holdout（2026-07-24）
+
+- 回放改为每次查询执行 `4` 个可复现 flow-matching 样本：连续动作取均值后平滑、限幅，stop 使用 ensemble 投票；HDF5 同时保存 stop score、votes 和实际执行命令。验收仍为 learner-only，不启用 DAgger、目标位姿制动或专家干预。
+- `train_0000/0009/0027/0073` 四条训练分布内可见目标场景已从 `0/4` 提升为严格成功 `4/4`：跌倒 `0`、false stop `0`、四条视频全部通过；最终目标距离分别为 `0.4374/0.2969/0.3392/0.4243 m`，最低根高均不低于 `0.4146 m`。汇总为 `logs/m20_smolvla_objectnav_replay_v4_ensemble4_summary.json`。
+- 该 `4/4` 只能证明训练场景回放闭环通过，不能证明泛化。首条未参与训练的 `validation_0000` 严格失败：无跌倒，最小/最终目标距离 `1.0362/1.0778 m`，第 `110` 步 learner stop latch，未进入 `0.8 m` 成功半径。
+- 失败根因是 stop 监督从约 `1.2 m` 开始，而专家仍继续慢速接近至 `0.8 m`；旧回放把 stop 预测直接解释为立即停车，导致 holdout 提前制动。当前正在加入两阶段 stop 状态机：连续确认后先进入 `60` 帧、最大前进速度 `0.18 m/s` 的受限 approach，再锁定停车。该逻辑不读取目标位姿。
+- 截至本次状态核对，approach 主逻辑、实际执行命令记录和参数 HDF5 attrs 已进入未提交工作树，但 episode JSON/armed-step 诊断、回放脚本显式参数和新的 holdout 回放尚未全部完成，不能把修复写成已通过。当前无 Isaac Sim、训练或回放进程运行。
+- 下一门禁是先重跑 `validation_0000`，再跑 `validation_0009`、`test_visible_0004`、`test_visible_0011`；之后扩展到至少 `20` 条 holdout 并汇总成功率。隐藏目标搜索、place navigation 和 `1 m` 障碍跳跃仍未开始。
+
 ## 待办路线
 
-1. 场景/物体/指令 manifest、MultiMesh LiDAR、同步 HDF5 和两个不同场景的严格成功 visible ObjectNav 已完成。
-2. 按 manifest 自动采集剩余训练覆盖，只保留 `success=true` 且通过数据审计的 episode；补齐 `8/12/24` 覆盖后，只在 `ready_for_visible_objectnav_finetune=true` 时进入 LeRobot v3 转换。
-   推荐首批覆盖命令：`./scripts/collect_m20_visible_objectnav_batch.sh train_0001 train_0002 train_0003 train_0004 train_0016 train_0024 train_0032 train_0040`。
-3. 转换后审计前/后 RGB、LiDAR 派生视觉特征、6 维高层 action chunk、本体状态、自然语言、专家来源、时间戳和 train/validation/test 隔离，再以冻结视觉主干的单卡配置微调 SmolVLA。
-4. 第一个验收不看 loss：对未参与训练的场景、指令和目标位置运行至少 `20` 个 visible ObjectNav 闭环 episode，交付成功率、失败类型、aggregate JSON 和逐 episode H.264 视频。
+1. 完成两阶段 stop 状态机的指标记录、脚本参数和静态检查，重跑 `validation_0000` 验证提前停车修复。
+2. 依次跑 `validation_0009`、`test_visible_0004`、`test_visible_0011`，每条保存 JSON、HDF5 和 H.264 视频，不用训练 episode 代替泛化证据。
+3. 扩展到至少 `20` 条未参与训练的 visible ObjectNav episode，报告成功率、跌倒率、false-stop、失败类型和逐 episode 视频。
+4. 若 holdout 仍显示系统性提前停车，修正数据中的 approach/stop 动作语义并重新训练，不用目标位姿或手工距离阈值在推理时掩盖问题。
 5. 然后加入目标位于侧后方、被遮挡和跨房间的成功轨迹，训练主动 search 和记忆，按 discovery rate、false-stop rate 和完整任务成功率验收。
 6. 接入可验证的公开四足 parkour checkpoint。若没有 M20 的 1 m 障碍专家，由于项目仅做仿真且不要求沿用 M20 动力学，切换到有公开 checkpoint 的 Go1/ANYmal 仿真资产完成 parkour 分支，不再用失败关节序列冒充 jump 数据。
 
