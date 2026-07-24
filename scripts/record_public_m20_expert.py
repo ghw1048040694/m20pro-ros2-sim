@@ -2171,6 +2171,9 @@ def main() -> None:
             h5.attrs["stop_latched"] = stop_latched
             h5.attrs["stop_latched_step"] = -1 if stop_latched_step is None else stop_latched_step
             h5.attrs["smolvla_stop_latched"] = smolvla_stop_latched
+            h5.attrs["smolvla_stop_armed_step"] = (
+                -1 if smolvla_stop_armed_step is None else smolvla_stop_armed_step
+            )
             h5.attrs["smolvla_stop_latched_step"] = (
                 -1 if smolvla_stop_latched_step is None else smolvla_stop_latched_step
             )
@@ -2272,6 +2275,7 @@ def main() -> None:
                 None if args.smolvla_checkpoint is None else str(args.smolvla_checkpoint)
             ),
             "smolvla_stop_latched": smolvla_stop_latched,
+            "smolvla_stop_armed_step": smolvla_stop_armed_step,
             "smolvla_stop_latched_step": smolvla_stop_latched_step,
             "smolvla_inference_count": smolvla_inference_count,
             "smolvla_ensemble_size": args.smolvla_ensemble_size,

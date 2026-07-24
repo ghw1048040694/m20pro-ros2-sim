@@ -26,12 +26,23 @@ if [[ ! -f "${M20PRO_USD_PATH}" ]]; then
   exit 1
 fi
 
-# The Isaac Lab rendering experience is already cheaper than the full Isaac
-# Sim profile. This preset additionally reduces the interactive viewport and
-# disables the remaining expensive lighting effects; sensor image sizes and
-# recorded MP4 resolution are unchanged.
-LOW_RENDER_KIT_ARGS="--/app/renderer/resolution/width=960 --/app/renderer/resolution/height=540 --/app/window/width=960 --/app/window/height=540 --/rtx/shadows/enabled=false --/rtx/reflections/enabled=false --/rtx/indirectDiffuse/enabled=false --/rtx/ambientOcclusion/enabled=false --/rtx/translucency/enabled=false --/rtx/directLighting/sampledLighting/enabled=false --/rtx/post/dlss/execMode=0 --/renderer/multiGpu/maxGpuCount=1"
-KIT_ARGS="${M20PRO_KIT_ARGS:-${LOW_RENDER_KIT_ARGS}}"
+# The low-render preset is for interactive inspection only: global RTX
+# lighting settings also affect sensor pixels. Headless evaluation therefore
+# retains the training-time renderer and only disables Kit multi-GPU use.
+HEADLESS_REPLAY=false
+for argument in "$@"; do
+  case "${argument}" in
+    --headless|--headless=true) HEADLESS_REPLAY=true ;;
+  esac
+done
+GUI_LOW_RENDER_KIT_ARGS="--/app/renderer/resolution/width=960 --/app/renderer/resolution/height=540 --/app/window/width=960 --/app/window/height=540 --/rtx/shadows/enabled=false --/rtx/reflections/enabled=false --/rtx/indirectDiffuse/enabled=false --/rtx/ambientOcclusion/enabled=false --/rtx/translucency/enabled=false --/rtx/directLighting/sampledLighting/enabled=false --/rtx/post/dlss/execMode=0 --/renderer/multiGpu/maxGpuCount=1"
+HEADLESS_KIT_ARGS="--/renderer/multiGpu/maxGpuCount=1"
+if [[ "${HEADLESS_REPLAY}" == true ]]; then
+  DEFAULT_KIT_ARGS="${HEADLESS_KIT_ARGS}"
+else
+  DEFAULT_KIT_ARGS="${GUI_LOW_RENDER_KIT_ARGS}"
+fi
+KIT_ARGS="${M20PRO_KIT_ARGS:-${DEFAULT_KIT_ARGS}}"
 
 exec python "${SCRIPT_DIR}/record_public_m20_expert.py" \
   --policy "${DATA_ROOT}/public_experts/m20_native/policy.onnx" \
@@ -47,8 +58,9 @@ exec python "${SCRIPT_DIR}/record_public_m20_expert.py" \
   --smolvla-ensemble-size 4 \
   --smolvla-inference-seed 20260723 \
   --smolvla-stop-threshold 0.4 \
-  --smolvla-stop-min-votes 1 \
+  --smolvla-stop-min-votes 2 \
   --smolvla-stop-confirm-steps 2 \
+  --smolvla-stop-approach-steps 0 \
   --smolvla-command-max-forward 0.45 \
   --smolvla-command-max-yaw 0.35 \
   --smolvla-command-smoothing 0.5 \
@@ -57,5 +69,5 @@ exec python "${SCRIPT_DIR}/record_public_m20_expert.py" \
   --wheel-damping 0.6 \
   --stop-wheel-damping 0.6 \
   --startup-action-blend-steps 1 \
-  --kit_args "${KIT_ARGS}" \
+  --kit_args="${KIT_ARGS}" \
   "$@"

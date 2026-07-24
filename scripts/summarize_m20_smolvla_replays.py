@@ -120,12 +120,14 @@ def audit_episode(path: Path) -> dict:
     )
     return {
         "episode_id": metrics["episode_id"],
+        "split": scenario.get("split", "unknown"),
         "success": bool(metrics.get("success")),
         "stable": bool(metrics.get("stable")),
         "startup_posture_ok": metrics.get("startup_posture_ok") is True,
         "posture_ok": metrics.get("posture_ok") is True,
         "terminated_steps": int(metrics.get("terminated_steps", 0)),
         "target_reached_step": reached_step,
+        "smolvla_stop_armed_step": metrics.get("smolvla_stop_armed_step"),
         "smolvla_stop_latched_step": stop_step,
         "stop_after_reach": stop_after_reach,
         "min_target_distance_m": metrics.get("min_target_distance_m"),
@@ -154,6 +156,28 @@ def audit_episode(path: Path) -> dict:
     }
 
 
+def summarize_group(episodes: list[dict]) -> dict:
+    count = len(episodes)
+    successes = sum(item["success"] for item in episodes)
+    reached = sum(item["target_reached_step"] is not None for item in episodes)
+    false_stops = sum(
+        item["smolvla_stop_latched_step"] is not None
+        and not item["stop_after_reach"]
+        for item in episodes
+    )
+    passed = sum(item["passed"] for item in episodes)
+    return {
+        "episodes": count,
+        "successes": successes,
+        "success_rate": successes / count,
+        "target_reached": reached,
+        "target_reached_rate": reached / count,
+        "false_stops": false_stops,
+        "posture_passed": sum(item["posture_ok"] for item in episodes),
+        "passed_episodes": passed,
+    }
+
+
 def main() -> None:
     args = parse_args()
     if args.expected_episodes <= 0:
@@ -170,6 +194,11 @@ def main() -> None:
         for item in episodes
     )
     passed = sum(item["passed"] for item in episodes)
+    split_summaries = {
+        split: summarize_group([item for item in episodes if item["split"] == split])
+        for split in sorted({item["split"] for item in episodes})
+    }
+    holdout_episodes = [item for item in episodes if item["split"] != "train"]
     result = {
         "schema": "m20pro_smolvla_closed_loop_summary_v1",
         "input_root": str(args.input_root),
@@ -191,6 +220,10 @@ def main() -> None:
             item["final_target_distance_m"] for item in episodes
         ),
         "passed_episodes": passed,
+        "split_summaries": split_summaries,
+        "holdout_summary": (
+            summarize_group(holdout_episodes) if holdout_episodes else None
+        ),
         "visible_objectnav_closed_loop_passed": bool(
             len(episodes) == args.expected_episodes and passed == len(episodes)
         ),
